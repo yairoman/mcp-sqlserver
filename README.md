@@ -1,0 +1,286 @@
+# morro-mcp-sqlserver
+
+**MCP Server para SQL Server** — Permite a cualquier LLM (Claude, Copilot, Cursor, etc.) conectarse a SQL Server para inspeccionar esquemas, leer datos, ejecutar queries, analizar performance y validar integridad de información.
+
+## 🚀 Quick Start
+
+### 1. Instalar dependencias
+
+```bash
+npm install
+```
+
+### 2. Configurar variables de entorno
+
+Copia el archivo de ejemplo y edítalo con tus credenciales:
+
+```bash
+cp .env.example .env
+```
+
+Edita el `.env` con los datos de tu SQL Server:
+
+```env
+# Conexión SQL Server
+MSSQL_HOST=tu-servidor          # IP o hostname del server
+MSSQL_PORT=1433                 # Puerto (default: 1433)
+MSSQL_USER=tu-usuario           # Usuario SQL
+MSSQL_PASSWORD=tu-password      # Contraseña
+MSSQL_DATABASE=master           # Base de datos inicial
+
+# Seguridad
+MSSQL_ENCRYPT=false             # true si usas SSL/TLS, false para conexiones locales
+MSSQL_TRUST_SERVER_CERTIFICATE=false  # true para aceptar certificados auto-firmados
+MSSQL_READ_ONLY=true            # true = solo SELECT, false = permite INSERT/UPDATE/DELETE
+
+# Límites
+MSSQL_MAX_ROWS=1000             # Máximo de filas por consulta
+MSSQL_QUERY_TIMEOUT=30000       # Timeout de queries en ms
+MSSQL_CONNECTION_TIMEOUT=15000  # Timeout de conexión en ms
+
+# Pool de conexiones
+MSSQL_POOL_MIN=1
+MSSQL_POOL_MAX=10
+```
+
+> **💡 Nota**: El servidor carga el archivo `.env` automáticamente usando `dotenv`. Si también configuras variables de entorno en tu cliente MCP (Claude, Codex, etc.), las del cliente tienen **prioridad** sobre el `.env`.
+
+### 3. Compilar
+
+```bash
+npm run build
+```
+
+### Configurar en Claude Desktop
+
+Edita `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "sqlserver": {
+      "command": "node",
+      "args": ["/ruta/completa/a/morro-mcp-sqlserver/dist/index.js"],
+      "env": {
+        "MSSQL_HOST": "tu-servidor",
+        "MSSQL_PORT": "1433",
+        "MSSQL_USER": "tu-usuario",
+        "MSSQL_PASSWORD": "tu-password",
+        "MSSQL_DATABASE": "master",
+        "MSSQL_TRUST_SERVER_CERTIFICATE": "true",
+        "MSSQL_READ_ONLY": "true",
+        "MSSQL_MAX_ROWS": "1000"
+      }
+    }
+  }
+}
+```
+
+### Configurar en Cursor / VS Code
+
+Añadir a `.cursor/mcp.json` o la configuración MCP de tu editor:
+
+```json
+{
+  "mcpServers": {
+    "sqlserver": {
+      "command": "node",
+      "args": ["dist/index.js"],
+      "cwd": "/ruta/completa/a/morro-mcp-sqlserver",
+      "env": {
+        "MSSQL_HOST": "tu-servidor",
+        "MSSQL_USER": "tu-usuario",
+        "MSSQL_PASSWORD": "tu-password",
+        "MSSQL_DATABASE": "master",
+        "MSSQL_TRUST_SERVER_CERTIFICATE": "true"
+      }
+    }
+  }
+}
+```
+
+### Configurar en Antigravity (Google Gemini)
+
+Añadir al archivo `.gemini/settings.json` en la raíz de tu proyecto:
+
+```json
+{
+  "mcpServers": {
+    "morro-mcp-sqlserver": {
+      "command": "node",
+      "args": ["/ruta/completa/a/morro-mcp-sqlserver/dist/index.js"],
+      "env": {
+        "MSSQL_HOST": "tu-servidor",
+        "MSSQL_PORT": "1433",
+        "MSSQL_USER": "tu-usuario",
+        "MSSQL_PASSWORD": "tu-password",
+        "MSSQL_DATABASE": "master",
+        "MSSQL_TRUST_SERVER_CERTIFICATE": "true",
+        "MSSQL_READ_ONLY": "true",
+        "MSSQL_MAX_ROWS": "1000"
+      }
+    }
+  }
+}
+```
+
+### Configurar en Codex (OpenAI)
+
+En Codex, ve a **Configuración > MCP > Conectar con un MCP personalizado** y llena los campos:
+
+| Campo                    | Valor                              |
+| ------------------------ | ---------------------------------- |
+| **Nombre**               | `morro-mcp-sqlserver`              |
+| **Tipo**                 | `STDIO` (seleccionado por defecto) |
+| **Comando para iniciar** | `node`                             |
+
+**Argumentos** (clic en "+ Agregar argumento"):
+
+| #   | Valor                                                |
+| --- | ---------------------------------------------------- |
+| 1   | `/ruta/completa/a/morro-mcp-sqlserver/dist/index.js` |
+
+**Variables de entorno** (clic en "+ Agregar variable de entorno" por cada una):
+
+| Clave                            | Valor         |
+| -------------------------------- | ------------- |
+| `MSSQL_HOST`                     | `tu-servidor` |
+| `MSSQL_PORT`                     | `1433`        |
+| `MSSQL_USER`                     | `tu-usuario`  |
+| `MSSQL_PASSWORD`                 | `tu-password` |
+| `MSSQL_DATABASE`                 | `master`      |
+| `MSSQL_TRUST_SERVER_CERTIFICATE` | `true`        |
+| `MSSQL_READ_ONLY`                | `true`        |
+| `MSSQL_MAX_ROWS`                 | `1000`        |
+
+**Directorio de trabajo**: `/ruta/completa/a/morro-mcp-sqlserver`
+
+Finalmente, clic en **Guardar**.
+
+> **Alternativa sin compilar**: Puedes usar `npx` como comando y `tsx /ruta/a/morro-mcp-sqlserver/src/index.ts` como argumento para ejecutar directamente desde TypeScript.
+
+---
+
+## 🛠️ Tools Disponibles (29)
+
+### 📋 Schema & Metadata (9)
+
+| Tool                     | Descripción                                             |
+| ------------------------ | ------------------------------------------------------- |
+| `list_databases`         | Lista todas las bases de datos del servidor             |
+| `list_tables`            | Lista tablas con row count, tamaño y filtro por esquema |
+| `describe_table`         | Columnas, tipos, PKs, FKs, defaults, identity           |
+| `list_views`             | Views con definición SQL opcional                       |
+| `list_stored_procedures` | SPs con parámetros y definición                         |
+| `list_triggers`          | Triggers con tipo, eventos y estado                     |
+| `list_indexes`           | Índices con columnas y filtros                          |
+| `list_foreign_keys`      | Relaciones FK con acciones de cascade                   |
+| `get_object_definition`  | Código T-SQL de cualquier objeto                        |
+
+### 📊 Data Access (4)
+
+| Tool                   | Descripción                                         |
+| ---------------------- | --------------------------------------------------- |
+| `read_table_data`      | Lee datos de tablas con filtros, paginación y orden |
+| `execute_select_query` | Ejecuta SELECT arbitrario (validado como read-only) |
+| `search_data`          | Busca valores con LIKE en columnas específicas      |
+| `get_table_sample`     | Muestra representativa + estadísticas básicas       |
+
+### ⚡ Query Execution (3)
+
+| Tool             | Descripción                                          |
+| ---------------- | ---------------------------------------------------- |
+| `execute_query`  | Ejecuta cualquier query T-SQL (read-only/read-write) |
+| `explain_query`  | Plan de ejecución estimado                           |
+| `validate_query` | Validación de sintaxis sin ejecutar                  |
+
+### 📈 Performance & Monitoring (7)
+
+| Tool                    | Descripción                             |
+| ----------------------- | --------------------------------------- |
+| `get_index_usage_stats` | Estadísticas de uso de índices          |
+| `get_missing_indexes`   | Índices recomendados por el optimizer   |
+| `get_active_sessions`   | Sesiones activas y queries en ejecución |
+| `get_blocking_chains`   | Cadenas de bloqueo activas              |
+| `get_wait_stats`        | Estadísticas de espera del servidor     |
+| `get_table_statistics`  | Estadísticas de columnas y frescura     |
+| `get_query_stats`       | Top queries por CPU/duración/lecturas   |
+
+### 🔍 Integrity & Analysis (6)
+
+| Tool                          | Descripción                            |
+| ----------------------------- | -------------------------------------- |
+| `check_referential_integrity` | Detecta registros huérfanos por FK     |
+| `find_duplicate_records`      | Encuentra duplicados en columnas clave |
+| `check_null_analysis`         | Análisis de NULLs por columna          |
+| `validate_data_types`         | Detecta tipos de datos inconsistentes  |
+| `get_row_counts_all_tables`   | Conteo de filas de todas las tablas    |
+| `compare_table_schemas`       | Compara esquemas entre tablas          |
+
+---
+
+## 📚 Resources
+
+| Resource         | URI                                 | Descripción                       |
+| ---------------- | ----------------------------------- | --------------------------------- |
+| Server Info      | `sqlserver://server-info`           | Versión, edición, memoria, uptime |
+| Database Diagram | `sqlserver://database-diagram/{db}` | ERD en formato Mermaid            |
+
+---
+
+## ⚙️ Variables de Entorno
+
+| Variable                         | Default     | Descripción                  |
+| -------------------------------- | ----------- | ---------------------------- |
+| `MSSQL_HOST`                     | (requerido) | Host del SQL Server          |
+| `MSSQL_PORT`                     | `1433`      | Puerto                       |
+| `MSSQL_USER`                     | (requerido) | Usuario SQL                  |
+| `MSSQL_PASSWORD`                 | (requerido) | Contraseña                   |
+| `MSSQL_DATABASE`                 | `master`    | Base de datos por defecto    |
+| `MSSQL_ENCRYPT`                  | `true`      | Encriptar conexión           |
+| `MSSQL_TRUST_SERVER_CERTIFICATE` | `true`      | Confiar en certificado       |
+| `MSSQL_READ_ONLY`                | `true`      | Solo permitir SELECT         |
+| `MSSQL_MAX_ROWS`                 | `1000`      | Máximo de filas por consulta |
+| `MSSQL_QUERY_TIMEOUT`            | `30000`     | Timeout de queries (ms)      |
+| `MSSQL_CONNECTION_TIMEOUT`       | `15000`     | Timeout de conexión (ms)     |
+| `MSSQL_POOL_MIN`                 | `1`         | Conexiones mínimas del pool  |
+| `MSSQL_POOL_MAX`                 | `10`        | Conexiones máximas del pool  |
+
+---
+
+## 🔒 Seguridad
+
+- **Read-only por defecto**: Solo queries SELECT permitidos
+- **Validación de queries**: Detecta patrones peligrosos (DROP, xp_cmdshell, etc.)
+- **Sanitización de identificadores**: Previene SQL injection
+- **Timeouts configurables**: Previene queries indefinidos
+- **Límite de filas**: Previene descarga accidental de tablas enormes
+
+---
+
+## 🐳 Docker
+
+```bash
+docker build -t morro-mcp-sqlserver .
+docker run --rm \
+  -e MSSQL_HOST=host.docker.internal \
+  -e MSSQL_USER=sa \
+  -e MSSQL_PASSWORD=yourpassword \
+  morro-mcp-sqlserver
+```
+
+---
+
+## 🏗️ Desarrollo
+
+```bash
+npm install       # Instalar dependencias
+npm run build     # Compilar TypeScript
+npm run dev       # Desarrollo con hot reload
+npm run lint      # Verificar tipos
+npm test          # Ejecutar tests
+```
+
+## 📄 Licencia
+
+MIT
