@@ -6,7 +6,7 @@ import { config as dotenvConfig } from "dotenv";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const envPath = resolve(__dirname, "..", ".env");
-dotenvConfig({ path: envPath });
+dotenvConfig({ path: envPath, quiet: true });
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "./config.js";

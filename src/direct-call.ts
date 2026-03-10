@@ -5,7 +5,7 @@ import { config as dotenvConfig } from "dotenv";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-dotenvConfig({ path: resolve(__dirname, "..", ".env") });
+dotenvConfig({ path: resolve(__dirname, "..", ".env"), quiet: true });
 
 import { loadConfig } from "./config.js";
 
