@@ -6,3 +6,14 @@ dist/
 coverage/
 .turbo/
 /sql
+
+# Investigaciones de base de datos: informes y scripts de remediacion.
+# Contienen nombres de objetos, volumenes y estructura de bases productivas
+# de clientes. Solo local, no se versiona.
+docs/
+
+# Claude Code: los skills del proyecto SI se versionan (.claude/skills/).
+# El estado local de la maquina, no.
+.claude/settings.local.json
+.claude/sessions/
+.claude/shell-snapshots/

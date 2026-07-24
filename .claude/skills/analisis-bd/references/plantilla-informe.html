@@ -1,0 +1,360 @@
+<!--
+  =========================================================================
+  PLANTILLA DE INFORME - skill analisis-bd
+
+  Copiar a  docs/<slug>/analisis-<slug>.html  y sustituir los marcadores
+  {{...}}. NO rediseñar el CSS: es lo que hace que todos los informes de
+  docs/ se lean como una misma serie.
+
+  REGLAS DE CONTENIDO
+    - Cada cifra viene de una consulta que ejecutaste. Sin estimaciones.
+    - El titular es una afirmacion con giro, no un tema.
+    - La seccion 05 es obligatoria si hubo reescritura, e incluye siempre
+      el bloque "Lo que la verificacion NO cubre".
+    - Los hallazgos que decides no corregir van con prefijo N- y severidad
+      "Funcional".
+    - Elimina las secciones que no apliquen; no dejes marcadores sin llenar.
+
+  UTILIDADES DE CLASE
+    Celdas numericas : class="tnum"  (+ good / warn / bad para color)
+    Codigo en linea  : <span class="mono">  o  <span class="inline">
+    Salto de pagina  : class="brk" en <section>
+    Bloque de codigo : <div class="code"> con spans .c .k .s .r
+  =========================================================================
+-->
+<meta charset="utf-8">
+<title>Análisis de Optimización · {{OBJETO}}</title>
+<style>
+  :root {
+    --paper:#FBFAF6; --panel:#F3F0E9; --ink:#14181F; --muted:#5C6470; --faint:#8A8F98;
+    --hair:#DDD7CB; --teal:#0F766E; --teal-deep:#0B4F49; --teal-wash:#E7F0EE;
+    --amber:#B4530F; --amber-wash:#F7ECE1; --crit:#B42318; --crit-wash:#F9E7E4;
+    --ok:#15803D; --ok-wash:#E6F1E9; --term-bg:#12161D; --term-line:#2A313C;
+  }
+  * { box-sizing:border-box; }
+  html { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  @page { size: letter; margin:14mm 0; background:#FBFAF6; @bottom-right { content: counter(page) " / " counter(pages); font-family:"Cascadia Code",Consolas,monospace; font-size:9px; color:#8A8F98; margin-right:13mm; } }
+  body { margin:0; background:var(--paper); color:var(--ink);
+    font-family:"Segoe UI",system-ui,-apple-system,sans-serif; font-size:12px; line-height:1.55; -webkit-font-smoothing:antialiased; }
+  .page { width:190mm; margin:0 auto; padding:0 4mm; }
+  .display { font-family:"Sitka Heading","Sitka",Georgia,serif; font-weight:700; letter-spacing:-0.01em; }
+  .mono { font-family:"Cascadia Code","Cascadia Mono",Consolas,monospace; font-variant-ligatures:none; }
+  .eyebrow { font-family:"Cascadia Code",Consolas,monospace; font-size:9.6px; letter-spacing:0.22em; text-transform:uppercase; color:var(--teal); font-weight:600; }
+
+  .mast { display:flex; justify-content:space-between; align-items:flex-end; border-bottom:2.4px solid var(--ink); padding-bottom:10.8px; }
+  .mast .name { font-family:"Cascadia Code",Consolas,monospace; font-size:14.4px; font-weight:600; margin-top:2.4px; }
+  .mast .meta { text-align:right; font-family:"Cascadia Code",Consolas,monospace; font-size:9px; color:var(--muted); line-height:1.7; }
+  .rule-tick { height:4.8px; background:repeating-linear-gradient(90deg,var(--ink) 0 1.2px,transparent 1.2px 10.8px); margin-bottom:24px; }
+
+  h1.title { font-family:"Sitka Heading","Sitka",Georgia,serif; font-weight:700; font-size:38.4px; line-height:1.05; letter-spacing:-0.02em; margin:14.4px 0 0; }
+  h1.title em { font-style:italic; color:var(--teal); }
+  .lede { font-size:13.2px; color:var(--muted); max-width:132mm; margin-top:12px; }
+
+  .window { display:grid; grid-template-columns:repeat(5,1fr); border:1.2px solid var(--hair); border-radius:9.6px; margin-top:21.6px; overflow:hidden; background:#fff; }
+  .window .cell { padding:13.2px 14.4px; border-right:1.2px solid var(--hair); }
+  .window .cell:last-child { border-right:none; }
+  .window .k { font-family:"Cascadia Code",Consolas,monospace; font-size:8.4px; letter-spacing:0.12em; text-transform:uppercase; color:var(--faint); }
+  .window .v { font-family:"Sitka Heading","Sitka",Georgia,serif; font-size:22.8px; font-weight:700; color:var(--teal); line-height:1.1; margin-top:3.6px; }
+  .window .v small { font-size:10.8px; color:var(--muted); font-family:"Segoe UI",sans-serif; font-weight:400; }
+
+  .verdict { display:grid; grid-template-columns:auto 1fr; gap:16.8px; align-items:center; background:var(--term-bg); border-radius:9.6px; padding:19.2px 21.6px; margin-top:19.2px; color:#C7CEDA; }
+  .verdict .tag { font-family:"Cascadia Code",Consolas,monospace; font-size:9.6px; letter-spacing:0.16em; text-transform:uppercase; color:#F0A98A; }
+  .verdict h2 { font-family:"Sitka Heading","Sitka",Georgia,serif; font-size:22.8px; font-weight:700; color:#fff; margin:3.6px 0 6px; letter-spacing:-0.01em; }
+  .verdict p { margin:0; font-size:11.4px; color:#A9B2C0; max-width:122mm; }
+  .verdict .dial { width:91.2px; height:91.2px; border-radius:50%; background:conic-gradient(var(--crit) 0 55%, var(--amber) 55% 85%, var(--term-line) 85% 100%); display:flex; align-items:center; justify-content:center; }
+  .verdict .dial .in { width:67.2px; height:67.2px; border-radius:50%; background:var(--term-bg); display:flex; flex-direction:column; align-items:center; justify-content:center; }
+  .verdict .dial .score { font-family:"Sitka Heading",Georgia,serif; font-size:25.2px; font-weight:700; color:#fff; line-height:1; }
+  .verdict .dial .lbl { font-family:"Cascadia Code",Consolas,monospace; font-size:7.2px; letter-spacing:0.1em; color:#7B8494; margin-top:2.4px; }
+
+  section { margin-top:31.2px; }
+  .brk { page-break-before:always; }
+  .sec-head { display:flex; align-items:baseline; gap:14.4px; border-bottom:1.2px solid var(--hair); padding-bottom:7.2px; margin-bottom:16.8px; }
+  .sec-head .no { font-family:"Cascadia Code",Consolas,monospace; font-size:10.8px; color:var(--teal); font-weight:700; }
+  .sec-head h2 { font-family:"Sitka Heading","Sitka",Georgia,serif; font-size:21.6px; font-weight:700; letter-spacing:-0.01em; margin:0; }
+  .sec-head .kicker { font-family:"Cascadia Code",Consolas,monospace; font-size:9px; letter-spacing:0.16em; text-transform:uppercase; color:var(--faint); margin-left:auto; }
+  p.body { color:var(--muted); margin:0 0 12px; }
+  .two { display:grid; grid-template-columns:1fr 1fr; gap:21.6px; }
+
+  table { width:100%; border-collapse:collapse; margin-top:2.4px; }
+  th { text-align:left; font-family:"Cascadia Code",Consolas,monospace; font-size:8.4px; letter-spacing:0.1em; text-transform:uppercase; color:var(--faint); border-bottom:1.8px solid var(--ink); padding:0 9.6px 6px 0; font-weight:600; }
+  td { padding:6px 9.6px 6px 0; border-bottom:1.2px solid var(--hair); vertical-align:top; }
+  td.m { font-family:"Cascadia Code",Consolas,monospace; }
+  .tnum { text-align:right; font-family:"Cascadia Code",Consolas,monospace; }
+  tr .good { color:var(--ok); font-weight:600; }
+  tr .bad { color:var(--crit); font-weight:600; }
+  tr .warn { color:var(--amber); font-weight:600; }
+  .inline { font-family:"Cascadia Code",Consolas,monospace; font-size:10.2px; background:var(--panel); border:1.2px solid var(--hair); border-radius:3.6px; padding:0 4.8px; color:var(--teal-deep); white-space:nowrap; }
+
+  .finding { border:1.2px solid var(--hair); border-left-width:4.8px; border-radius:0 8.4px 8.4px 0; padding:14.4px 16.8px; margin-bottom:14.4px; background:#fff; break-inside:avoid; }
+  .finding.crit { border-left-color:var(--crit); }
+  .finding.high { border-left-color:var(--amber); }
+  .finding.med { border-left-color:var(--teal); }
+  .finding.info { border-left-color:var(--faint); }
+  .finding .top { display:flex; align-items:center; gap:9.6px; margin-bottom:4.8px; }
+  .sev { font-family:"Cascadia Code",Consolas,monospace; font-size:8.4px; letter-spacing:0.08em; padding:2.4px 8.4px; border-radius:24px; font-weight:600; text-transform:uppercase; }
+  .sev.crit { background:var(--crit-wash); color:var(--crit); }
+  .sev.high { background:var(--amber-wash); color:var(--amber); }
+  .sev.med { background:var(--teal-wash); color:var(--teal-deep); }
+  .sev.info { background:var(--panel); color:var(--muted); }
+  .finding .id { font-family:"Cascadia Code",Consolas,monospace; font-size:9.6px; color:var(--faint); }
+  .finding h3 { font-size:14.4px; font-weight:700; margin:0; letter-spacing:-0.01em; flex:1; }
+  .finding .ev { font-size:11.4px; color:var(--muted); margin:2.4px 0 8.4px; }
+  .finding .ev b { color:var(--ink); }
+  .finding .fix { font-size:11.4px; background:var(--teal-wash); border-radius:6px; padding:8.4px 12px; color:var(--teal-deep); }
+  .finding .fix b { color:var(--teal-deep); }
+
+  .code { background:#15191F; color:#E3E8EF; border-radius:7.2px; padding:10.8px 14.4px; font-family:"Cascadia Code","Cascadia Mono",Consolas,monospace; font-size:10.2px; line-height:1.65; overflow-x:auto; white-space:pre; margin-top:4.8px; }
+  .code .c { color:#6E7787; } .code .k { color:#7DD3C0; } .code .s { color:#E5C07B; } .code .r { color:#E8998A; }
+
+  .callout { display:grid; grid-template-columns:auto 1fr; gap:13.2px; background:var(--amber-wash); border-left:3.6px solid var(--amber); border-radius:0 7.2px 7.2px 0; padding:13.2px 15.6px; margin-top:14.4px; break-inside:avoid; }
+  .callout .ic { font-size:15.6px; } .callout h4 { margin:0 0 2.4px; font-size:12.6px; color:var(--amber); } .callout p { margin:0; color:#6B4A2E; font-size:11.4px; }
+
+  .phase { position:relative; padding-left:52.8px; margin-bottom:19.2px; break-inside:avoid; }
+  .phase::before { content:""; position:absolute; left:18px; top:31.2px; bottom:-19.2px; width:2.4px; background:var(--hair); }
+  .phase:last-child::before { display:none; }
+  .phase .ph { position:absolute; left:0; top:0; width:38.4px; height:38.4px; border-radius:9.6px; background:var(--teal); color:#fff; font-family:"Cascadia Code",Consolas,monospace; font-weight:700; font-size:12px; display:flex; align-items:center; justify-content:center; }
+  .phase h3 { font-size:14.4px; margin:0 0 1.2px; letter-spacing:-0.01em; }
+  .phase .when { font-family:"Cascadia Code",Consolas,monospace; font-size:9px; color:var(--amber); letter-spacing:0.06em; text-transform:uppercase; }
+  .phase ul { margin:7.2px 0 0; padding-left:18px; color:var(--muted); }
+  .phase li { margin-bottom:2.4px; }
+
+  .proof { border:1.2px solid var(--ok); border-radius:8.4px; background:var(--ok-wash); padding:14.4px 16.8px; margin-top:14.4px; break-inside:avoid; }
+  .proof h4 { margin:0 0 7.2px; font-size:12.6px; color:var(--ok); font-family:"Sitka Heading",Georgia,serif; }
+  .proof table { margin-top:0; }
+  .proof th { border-bottom-color:var(--ok); color:#4A7A5C; }
+  .proof td { border-bottom-color:#C9DFD0; }
+
+  .foot { margin-top:31.2px; padding-top:12px; border-top:2.4px solid var(--ink); display:flex; justify-content:space-between; font-family:"Cascadia Code",Consolas,monospace; font-size:8.4px; letter-spacing:0.05em; color:var(--muted); }
+</style>
+
+<div class="page">
+
+<!-- ===================================================================== -->
+<!-- MASTHEAD - identifica el objeto y el contexto de la instancia          -->
+<!-- ===================================================================== -->
+<div class="mast">
+  <div>
+    <div class="eyebrow" style="color:var(--muted)">Análisis de código · Confidencial</div>
+    <div class="name">{{BASE}}.{{ESQUEMA}}.{{OBJETO}}</div>
+  </div>
+  <div class="meta">
+    {{TIPO_OBJETO}} · {{PERFIL_DE_USO}}<br>
+    {{VERSION_SQL}} · compat {{COMPAT}} · {{ALTA_DISPONIBILIDAD}}<br>
+    Emitido: {{AAAA}}·{{MM}}·{{DD}}
+  </div>
+</div>
+<div class="rule-tick"></div>
+
+<!-- TITULAR: una AFIRMACION, no un tema. La segunda linea en <em> es el giro. -->
+<div class="eyebrow">{{MOTIVO_DEL_ANALISIS}}</div>
+<h1 class="title">{{AFIRMACION_PARTE_1}}<br><em>{{AFIRMACION_PARTE_2}}</em></h1>
+<p class="lede">{{2-3 frases: la cifra que sorprende, y por que el problema no esta donde
+parece. Cada numero aqui debe venir de una consulta ejecutada.}}</p>
+
+<!-- 5 celdas, ni mas ni menos. Las cifras estructurales del objeto. -->
+<div class="window">
+  <div class="cell"><div class="k">Tamaño</div><div class="v">{{N}} <small>líneas</small></div></div>
+  <div class="cell"><div class="k">JOINs</div><div class="v">{{N}} <small>en {{N}} consultas</small></div></div>
+  <div class="cell"><div class="k">{{METRICA}}</div><div class="v">{{N}} <small>{{unidad}}</small></div></div>
+  <div class="cell"><div class="k">{{METRICA}}</div><div class="v">{{N}} <small>{{unidad}}</small></div></div>
+  <div class="cell"><div class="k">{{TABLA_CRITICA}}</div><div class="v">{{N}} <small>filas · {{estructura}}</small></div></div>
+</div>
+
+<!-- VEREDICTO: el dial es un conic-gradient; ajusta los cortes al reparto de severidad. -->
+<div class="verdict">
+  <div class="dial"><div class="in"><div class="score">{{A-F}}</div><div class="lbl">CÓDIGO</div></div></div>
+  <div>
+    <div class="tag">Veredicto</div>
+    <h2>{{Una frase que resume el diagnostico}}</h2>
+    <p>{{El mecanismo en 3-4 lineas. Resalta las cifras con
+    <b style="color:#fff">...</b> y los identificadores con <span class="mono">...</span>.}}</p>
+  </div>
+</div>
+
+<!-- ===================================================================== -->
+<!-- 01 PERFIL                                                             -->
+<!-- ===================================================================== -->
+<section>
+  <div class="sec-head"><span class="no">01</span><h2>Perfil del {{objeto}}</h2><span class="kicker">qué es y qué hace</span></div>
+  <p class="body"><strong>Propósito:</strong> {{que hace, quien lo llama, con que frecuencia,
+  que parametros recibe y que devuelve}}.</p>
+  <div class="two">
+    <div>
+      <table>
+        <tr><th>Estructura</th><th class="tnum">Conteo</th></tr>
+        <tr><td>{{elemento}}</td><td class="tnum">{{n}}</td></tr>
+        <tr><td>{{elemento}}</td><td class="tnum bad">{{n}}</td></tr>
+        <tr><td>{{elemento}}</td><td class="tnum warn">{{n}}</td></tr>
+        <tr><td>{{elemento}}</td><td class="tnum good">{{n}}</td></tr>
+      </table>
+    </div>
+    <div>
+      <!-- NOTA DE MEDICION: obligatoria si las cifras del plan cache no representan
+           el incidente (cache reciente, pocas ejecuciones, job por lotes...). -->
+      <p class="body" style="margin:0 0 7.2px"><strong>Nota de medición:</strong> {{como se
+      midio y que NO cubre esa medicion}}.</p>
+      <div class="callout" style="margin-top:9.6px">
+        <div class="ic">◆</div>
+        <div><h4 style="color:var(--amber)">Perfil de riesgo</h4>
+        <p>{{cuando duele y a quien alcanza}}</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================================== -->
+<!-- 02 EL MECANISMO - por que falla. Tabla mecanismo -> causa -> evidencia -->
+<!-- ===================================================================== -->
+<section class="brk">
+  <div class="sec-head"><span class="no">02</span><h2>{{Por qué ocurre}}</h2><span class="kicker">el mecanismo</span></div>
+  <p class="body">{{Descarta primero la explicacion intuitiva y equivocada.}}</p>
+  <table>
+    <tr><th style="width:22%">Mecanismo</th><th style="width:44%">Cómo se produce</th><th>Evidencia recolectada</th></tr>
+    <tr>
+      <td class="m bad">{{nombre}}</td>
+      <td>{{explicacion causal, no descriptiva}}</td>
+      <td>{{cifra medida + DMV de la que salio}}</td>
+    </tr>
+  </table>
+
+  <div class="callout" style="background:var(--crit-wash);border-color:var(--crit)">
+    <div class="ic" style="color:var(--crit)">▲</div>
+    <div><h4 style="color:var(--crit)">{{El detonante}}</h4>
+    <p style="color:#7A2A22">{{que convierte un problema latente en un incidente}}</p></div>
+  </div>
+</section>
+
+<!-- ===================================================================== -->
+<!-- 03 HALLAZGOS - una ficha por hallazgo, ordenadas por impacto            -->
+<!-- Severidades: crit / high / med / info                                  -->
+<!-- IDs: B-nn para hallazgos accionables, N-nn para los que NO se corrigen  -->
+<!-- ===================================================================== -->
+<section class="brk">
+  <div class="sec-head"><span class="no">03</span><h2>Hallazgos</h2><span class="kicker">ordenados por impacto</span></div>
+
+  <div class="finding crit">
+    <div class="top"><span class="sev crit">Crítico</span><span class="id">B-01</span><h3>{{Titulo afirmativo}}</h3></div>
+    <div class="ev"><b>Evidencia:</b> {{fragmento de codigo real, cifras reales. Marca el
+    hallazgo decisivo con <b>El punto clave:</b>}}</div>
+    <div class="fix"><b>Acción:</b> {{que hacer, y por que funciona}}</div>
+  </div>
+
+  <div class="finding high">
+    <div class="top"><span class="sev high">Alto</span><span class="id">B-02</span><h3>{{...}}</h3></div>
+    <div class="ev"><b>Evidencia:</b> {{...}}</div>
+    <div class="fix"><b>Acción:</b> {{...}}</div>
+  </div>
+
+  <div class="finding med">
+    <div class="top"><span class="sev med">Medio</span><span class="id">B-03</span><h3>{{...}}</h3></div>
+    <div class="ev"><b>Evidencia:</b> {{...}}</div>
+    <div class="fix"><b>Acción:</b> {{...}}</div>
+  </div>
+
+  <!-- Los hallazgos que NO se corrigen llevan severidad "Funcional" y prefijo N- -->
+  <div class="finding info">
+    <div class="top"><span class="sev info">Funcional</span><span class="id">N-01</span><h3>{{Inconsistencia detectada (NO corregida)}}</h3></div>
+    <div class="ev"><b>Evidencia:</b> {{...}}</div>
+    <div class="fix"><b>Acción:</b> <b>ninguna</b>. {{por que es una decision funcional y
+    donde queda marcada en el codigo}}</div>
+  </div>
+</section>
+
+<!-- ===================================================================== -->
+<!-- 04 EL PATRON EN CONCRETO - antes/despues del hallazgo principal         -->
+<!-- Clases de resaltado: .c comentario  .k keyword  .s cadena  .r problema  -->
+<!-- ===================================================================== -->
+<section class="brk">
+  <div class="sec-head"><span class="no">04</span><h2>El patrón, en concreto</h2><span class="kicker">antes / después</span></div>
+  <p class="body">{{que dos cambios se refuerzan entre si}}</p>
+  <div class="code"><span class="c">-- ANTES · {{por que esto es el problema}}</span>
+<span class="r">{{linea problematica}}</span>                     <span class="c">-- ← {{senalamiento}}</span>
+
+<span class="c">-- DESPUES · {{que cambia}}</span>
+<span class="k">SELECT</span> …
+<span class="k">OPTION</span> (RECOMPILE);                        <span class="c">-- ← {{por que}}</span></div>
+  <p class="body" style="margin-top:12px"><strong>Por qué funciona:</strong> {{el mecanismo
+  del arreglo, nombrando el indice o la estructura concreta que se aprovecha}}</p>
+</section>
+
+<!-- ===================================================================== -->
+<!-- 05 VERIFICACION - obligatoria si hubo reescritura                       -->
+<!-- ===================================================================== -->
+<section>
+  <div class="sec-head"><span class="no">05</span><h2>Verificación de equivalencia</h2><span class="kicker">v1 vs v2 sobre datos reales</span></div>
+  <p class="body">{{como se contrastaron: EXCEPT en ambas direcciones, sobre que lote}}</p>
+
+  <div class="proof">
+    <h4>Resultado: {{0}} diferencias en {{N}} combinaciones {{dimensiones del lote}}</h4>
+    <table>
+      <tr><th>Escenario</th><th class="tnum">Casos</th><th class="tnum">Filas v1</th><th class="tnum">Filas v2</th><th class="tnum">Solo en v1</th><th class="tnum">Solo en v2</th></tr>
+      <tr><td>{{escenario}}</td><td class="tnum">{{n}}</td><td class="tnum">{{n}}</td><td class="tnum">{{n}}</td><td class="tnum good">0</td><td class="tnum good">0</td></tr>
+    </table>
+    <p style="margin:9.6px 0 0; font-size:11px; color:#3F6B4E;">{{que rama concreta cubre
+    cada escenario}}</p>
+  </div>
+
+  <p class="body" style="margin-top:14.4px"><strong>Supuestos estructurales verificados</strong>
+  — la reescritura se apoya en ellos:</p>
+  <table>
+    <tr><th style="width:52%">Supuesto</th><th class="tnum">Medido</th><th class="tnum">Requerido</th></tr>
+    <tr><td>{{supuesto}}</td><td class="tnum good">0</td><td class="tnum">0</td></tr>
+  </table>
+
+  <!-- OBLIGATORIO: decir que NO cubre la verificacion -->
+  <div class="callout">
+    <div class="ic">◆</div>
+    <div><h4>Lo que la verificación NO cubre</h4>
+    <p>{{cambios de orden, hallazgos funcionales preservados, comportamiento de la app}}</p></div>
+  </div>
+</section>
+
+<!-- ===================================================================== -->
+<!-- 06 ESQUEMA - hallazgos fuera del objeto pero causantes del problema     -->
+<!-- ===================================================================== -->
+<section class="brk">
+  <div class="sec-head"><span class="no">06</span><h2>Hallazgos de esquema</h2><span class="kicker">fuera del objeto, pero causa del problema</span></div>
+  <p class="body">{{por que estos objetos importan aunque el objeto analizado no los use directamente}}</p>
+  <table>
+    <tr><th style="width:26%">Objeto</th><th style="width:16%" class="tnum">Tamaño</th><th>Diagnóstico</th></tr>
+    <tr><td class="m bad">{{objeto}}</td><td class="tnum bad">{{MB}}<br>{{filas}}</td><td>{{diagnostico}}</td></tr>
+  </table>
+</section>
+
+<!-- ===================================================================== -->
+<!-- 07 PLAN DE ACCION - fases, cada una con ventana y riesgo                -->
+<!-- ===================================================================== -->
+<section>
+  <div class="sec-head"><span class="no">07</span><h2>Plan de acción</h2><span class="kicker">qué hacer y en qué orden</span></div>
+
+  <div class="phase">
+    <div class="ph">1</div>
+    <div class="when">{{cuando · riesgo}}</div>
+    <h3>{{titulo de la fase}}</h3>
+    <ul>
+      <li>{{paso, citando el script concreto}}</li>
+      <li>{{que gana y que no toca}}</li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <div class="ph">2</div>
+    <div class="when">{{cuando · riesgo}}</div>
+    <h3>{{...}}</h3>
+    <ul><li>{{...}}</li></ul>
+  </div>
+
+  <div class="callout" style="background:var(--teal-wash);border-color:var(--teal)">
+    <div class="ic" style="color:var(--teal)">◆</div>
+    <div><h4 style="color:var(--teal-deep)">Empezar por aquí</h4>
+    <p style="color:var(--teal-deep)">{{por donde empezar y QUE METRICA medir antes/despues
+    — nombra la metrica exacta, no "el rendimiento"}}</p></div>
+  </div>
+</section>
+
+<div class="foot">
+  <span>Análisis de optimización · {{BASE}}.{{ESQUEMA}}.{{OBJETO}} · datos en vivo vía MCP (solo lectura)</span>
+  <span>{{cifra}} · veredicto: {{una palabra}}</span>
+</div>
+
+</div>
