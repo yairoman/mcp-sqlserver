@@ -67,7 +67,7 @@ interface ToolEntry {
  */
 export function createServer(config: AppConfig): Server {
   const server = new Server(
-    { name: "morro-mcp-sqlserver", version: "1.0.0" },
+    { name: "mcp-sqlserver", version: "1.1.0" },
     { capabilities: { tools: {}, resources: {} } }
   );
 

@@ -26,7 +26,7 @@ async function main() {
   const config = loadConfig();
 
   // Log to stderr (stdout is reserved for MCP JSON-RPC protocol)
-  console.error("🚀 morro-mcp-sqlserver starting...");
+  console.error("🚀 mcp-sqlserver starting...");
   console.error(`   Host: ${config.host}:${config.port}`);
   console.error(`   Database: ${config.database}`);
   console.error(`   Read-Only: ${config.readOnly}`);

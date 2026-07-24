@@ -1,4 +1,4 @@
-# morro-mcp-sqlserver
+# mcp-sqlserver
 
 **MCP Server para SQL Server** — Permite a cualquier LLM (Claude, Copilot, Cursor, etc.) conectarse a SQL Server para inspeccionar esquemas, leer datos, ejecutar queries, analizar performance y validar integridad de información.
 
@@ -60,7 +60,7 @@ Edita `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "sqlserver": {
       "command": "node",
-      "args": ["/ruta/completa/a/morro-mcp-sqlserver/dist/index.js"],
+      "args": ["/ruta/completa/a/mcp-sqlserver/dist/index.js"],
       "env": {
         "MSSQL_HOST": "tu-servidor",
         "MSSQL_PORT": "1433",
@@ -86,7 +86,7 @@ Añadir a `.cursor/mcp.json` o la configuración MCP de tu editor:
     "sqlserver": {
       "command": "node",
       "args": ["dist/index.js"],
-      "cwd": "/ruta/completa/a/morro-mcp-sqlserver",
+      "cwd": "/ruta/completa/a/mcp-sqlserver",
       "env": {
         "MSSQL_HOST": "tu-servidor",
         "MSSQL_USER": "tu-usuario",
@@ -106,9 +106,9 @@ Añadir al archivo `.gemini/settings.json` en la raíz de tu proyecto:
 ```json
 {
   "mcpServers": {
-    "morro-mcp-sqlserver": {
+    "mcp-sqlserver": {
       "command": "node",
-      "args": ["/ruta/completa/a/morro-mcp-sqlserver/dist/index.js"],
+      "args": ["/ruta/completa/a/mcp-sqlserver/dist/index.js"],
       "env": {
         "MSSQL_HOST": "tu-servidor",
         "MSSQL_PORT": "1433",
@@ -130,7 +130,7 @@ En Codex, ve a **Configuración > MCP > Conectar con un MCP personalizado** y ll
 
 | Campo                    | Valor                              |
 | ------------------------ | ---------------------------------- |
-| **Nombre**               | `morro-mcp-sqlserver`              |
+| **Nombre**               | `mcp-sqlserver`              |
 | **Tipo**                 | `STDIO` (seleccionado por defecto) |
 | **Comando para iniciar** | `node`                             |
 
@@ -138,7 +138,7 @@ En Codex, ve a **Configuración > MCP > Conectar con un MCP personalizado** y ll
 
 | #   | Valor                                                |
 | --- | ---------------------------------------------------- |
-| 1   | `/ruta/completa/a/morro-mcp-sqlserver/dist/index.js` |
+| 1   | `/ruta/completa/a/mcp-sqlserver/dist/index.js` |
 
 **Variables de entorno** (clic en "+ Agregar variable de entorno" por cada una):
 
@@ -153,11 +153,11 @@ En Codex, ve a **Configuración > MCP > Conectar con un MCP personalizado** y ll
 | `MSSQL_READ_ONLY`                | `true`        |
 | `MSSQL_MAX_ROWS`                 | `1000`        |
 
-**Directorio de trabajo**: `/ruta/completa/a/morro-mcp-sqlserver`
+**Directorio de trabajo**: `/ruta/completa/a/mcp-sqlserver`
 
 Finalmente, clic en **Guardar**.
 
-> **Alternativa sin compilar**: Puedes usar `npx` como comando y `tsx /ruta/a/morro-mcp-sqlserver/src/index.ts` como argumento para ejecutar directamente desde TypeScript.
+> **Alternativa sin compilar**: Puedes usar `npx` como comando y `tsx /ruta/a/mcp-sqlserver/src/index.ts` como argumento para ejecutar directamente desde TypeScript.
 
 ---
 
@@ -261,12 +261,12 @@ Finalmente, clic en **Guardar**.
 ## 🐳 Docker
 
 ```bash
-docker build -t morro-mcp-sqlserver .
+docker build -t mcp-sqlserver .
 docker run --rm \
   -e MSSQL_HOST=host.docker.internal \
   -e MSSQL_USER=sa \
   -e MSSQL_PASSWORD=yourpassword \
-  morro-mcp-sqlserver
+  mcp-sqlserver
 ```
 
 ---
