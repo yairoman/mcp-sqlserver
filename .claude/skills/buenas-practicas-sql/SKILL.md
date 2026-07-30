@@ -5,7 +5,7 @@ description: Base de conocimiento viva de buenas prácticas y anti-patrones de T
 
 # Buenas prácticas T-SQL — base de conocimiento
 
-**27 reglas en 4 niveles.** Ninguna es genérica de manual: cada una salió de un problema real
+**32 reglas en 4 niveles.** Ninguna es genérica de manual: cada una salió de un problema real
 medido en código productivo —o, en las marcadas `[gen]`, de un mecanismo conocido del motor
 que este entorno tiene todas las condiciones para sufrir— con su costo y su consulta de
 detección.
@@ -54,6 +54,8 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-04** | Transacciones cortas: nunca envuelvan trabajo externo |
 | **R-05** | `SELECT ... INTO #temp` en consulta larga bloquea la **instancia** entera |
 | **R-06** | Predicados *catch-all*: un plan para todos los parámetros |
+| **R-29** | Un identificador sin validar en el `WHERE` de una escritura masiva — *bloqueo y pérdida de datos a la vez* |
+| **R-32** | Un predicado que no cubre el prefijo de ninguna clave — *y el paralelismo que lo esconde* |
 
 ### Nivel 2 · Corrección — bugs silenciosos, sin síntoma
 
@@ -67,6 +69,8 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-12** | Determinismo: `TOP` sin `ORDER BY`, variables desde `SELECT` |
 | **R-13** | `ORDER BY` en un `SELECT ... INTO #temp` se pierde |
 | **R-26** | `SET XACT_ABORT ON` en todo procedimiento con transacciones — *el head blocker dormido* |
+| **R-30** | Un filtro nuevo se aplica a **todas** las condiciones hermanas, no solo a la del ticket |
+| **R-31** | Una condición que ya es cierta dentro de su propia rama: el bloque que nunca decide |
 
 ### Nivel 3 · Diseño y eficiencia
 
@@ -90,6 +94,7 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-23** | Un índice de más también cuesta |
 | **R-24** | Ninguna tabla grande debe ser un HEAP, y ninguna bitácora crece sin límite |
 | **R-25** | La configuración por defecto de la instancia no es la correcta |
+| **R-28** | La instrumentación de diagnóstico también se audita — *el vacío se lee como ausencia* |
 
 ---
 
@@ -133,6 +138,10 @@ copiando SQL a mano. Varias tienen tool dedicada:
 | Heaps y tablas sin clustered | `get_table_statistics`, `get_row_counts_all_tables` | R-24 |
 | Triggers del esquema y su código | `list_triggers` + `get_object_definition` | R-03, R-10 |
 | Head blockers y sesiones dormidas | `get_blocking_chains`, `get_active_sessions` | R-26 |
+| Cajón de centinelas en una columna de relación, y tablas que escalarían a lock de tabla | `execute_select_query` (`GROUP BY` de la columna; `lock_escalation_desc` en `sys.tables`) | R-29 |
+| Si la fuente de diagnóstico aún tiene la evidencia | `execute_select_query` sobre `sys.dm_xe_session_targets` y `sys.fn_xe_file_target_read_file` con `TOP (1)` | R-28 |
+| El mismo estado filtrado en unas condiciones del objeto y no en otras | `get_object_definition` y leerlo entero — el diff no basta | R-30 |
+| Coste real por sentencia, y si la ausencia de una prueba algo | `get_query_stats`; `execute_select_query` sobre Query Store, comprobando antes `query_capture_mode_desc` | R-28, R-31 |
 | Señal de contención en tempdb | `get_wait_stats` (`PAGELATCH_EX`, `LATCH_EX`) | R-05 |
 | Varianza de duración (max ≫ avg) | `get_query_stats` | R-06 |
 | FKs no confiables (en observación) | `check_referential_integrity` | registro |
