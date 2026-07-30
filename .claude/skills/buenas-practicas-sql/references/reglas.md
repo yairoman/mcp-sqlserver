@@ -45,6 +45,26 @@ WHERE t.NombreNorm LIKE @c
 Caso hermano: `ISNULL()` sobre una columna que el esquema ya declara `NOT NULL`. No cambia
 resultados, pero esconde los casos reales. Detectar cruzando con `sys.columns.is_nullable`.
 
+**Y el caso contrario, que es una trampa doble.** Si la columna **sí** es nullable, ese
+`ISNULL()` puede ser lo que sostiene la corrección: `ISNULL(col, 0) NOT IN (6)` incluye las
+filas con `NULL`, mientras que `col NOT IN (6)` las descarta —`NULL NOT IN (…)` es UNKNOWN—.
+Quitarlo sin más cambia el resultado. La forma sargable equivalente es explícita:
+
+```sql
+-- col es NULLABLE: estas dos NO son equivalentes
+WHERE ISNULL(col, 0) NOT IN (6, @otro)          -- incluye las filas NULL
+WHERE col NOT IN (6, @otro)                     -- las descarta en silencio
+
+-- Equivalente sargable, siempre que el centinela (0) no sea un valor real de la columna
+WHERE (col IS NULL OR col NOT IN (6, @otro))
+```
+
+La segunda mitad de la trampa: **puede no servir de nada**. Medido en un caso real donde el
+`seek` iba por otra columna del índice compuesto y el estado quedaba como predicado residual:
+**309.297 lecturas lógicas con la forma sargable frente a 309.329 con el `ISNULL`**, sobre el
+mismo lote de 20.000 ejecuciones. Diferencia: 0,01 %. Se aplica por forma y por legibilidad,
+no por rendimiento — y decirlo así en el informe evita prometer una mejora que no llega.
+
 ## R-02 · No llames un procedimiento dentro de un bucle fila por fila [obs]
 
 **Severidad:** crítica
@@ -148,6 +168,26 @@ Segundo efecto: las sentencias que referencian un `#temp` creado con `SELECT INT
 compilarse hasta runtime**. A alta frecuencia, varias sesiones compilan el mismo objeto y se
 serializan por *compile lock*.
 
+**Sub-caso: el catálogo materializado entero para cruzarlo contra nada.** Observado en una
+pantalla de consulta: `SELECT ... INTO #temp` unía seis tablas de un catálogo geográfico
+—ciudades, estados, países y sus tres tablas de idioma— **sin ninguna cláusula de filtro**, para
+después hacerle un `LEFT JOIN` contra las filas de un solo registro. Medido: **159.534 filas**
+volcadas a tempdb en cada apertura de la pantalla, para resolver una media de **12**.
+
+La forma es fácil de reconocer y fácil de pasar por alto en revisión, porque el `WHERE 1=1` de
+la subconsulta interior da la impresión de que hay filtro:
+
+```sql
+-- ANTI-PATRÓN: el filtro está fuera, sobre el resultado ya materializado
+SELECT T.ID, T.Nombre INTO #Cat
+FROM ( SELECT ... FROM dbo.Cat1 c JOIN dbo.Cat2 ... WHERE 1=1 ) AS T;
+
+-- CORRECTO: filtrar por las claves que la consulta va a usar de verdad
+SELECT c.ID, c.Nombre INTO #Cat
+FROM dbo.Cat1 c JOIN dbo.Cat2 ...
+WHERE c.ID IN (SELECT CatID FROM #Origen WHERE CatID > 0);
+```
+
 ## R-06 · Predicados *catch-all*: un plan para todos los parámetros [obs]
 
 **Severidad:** crítica
@@ -174,6 +214,136 @@ Nunca `WITH RECOMPILE` a nivel de procedimiento.
 
 Trampa relacionada: reasignar el parámetro al inicio (`SET @p = ISNULL(@p, ...)`) no ayuda —
 el optimizador sigue usando el valor *sniffed* original.
+
+## R-29 · Un identificador sin validar en el `WHERE` de una escritura masiva [obs]
+
+**Severidad:** crítica — *es bloqueo de instancia y pérdida de datos a la vez*
+
+Cuando una columna usa `0` o `''` como centinela de «todavía sin asignar», ese valor **no es un
+identificador: es un cajón**, y el cajón crece sin límite. Si un parámetro que puede llegar con
+el centinela se usa tal cual en el `WHERE` de un `UPDATE` o un `DELETE`, la sentencia no afecta
+a una entidad — afecta a todo lo que aún no tiene entidad.
+
+Observado en un procedimiento de captura con envío en dos pasos. La rama «guardar y enviar»
+llamaba a la rama «guardar» **antes** de crear el registro padre, de modo que el identificador
+valía `'0'` en ese momento. El `UPDATE` de limpieza filtraba por él:
+
+```sql
+-- ANTI-PATRÓN: @IdPadre puede valer '0' o '' y nadie lo comprueba
+IF ISNULL(@EsEnvio,0) <> 0
+BEGIN
+    UPDATE T SET Inactive = 1
+    FROM dbo.TablaCaptura T
+        LEFT JOIN #Detalle D ON D.CapturaID = T.CapturaID
+    WHERE T.IdPadre = @IdPadre        -- '0' → el cajón entero
+      AND D.CapturaID IS NULL
+
+-- CORRECTO: el identificador tiene que designar algo
+IF ISNULL(@EsEnvio,0) <> 0 AND ISNULL(@IdPadre,'0') NOT IN ('','0')
+```
+
+**Las dos consecuencias, medidas.** Sobre una tabla de 4,76 M filas y 1,88 GB, el valor
+centinela concentraba **618.580 filas** frente a una media de **12 por identificador real**:
+
+1. **Escalada de lock a tabla.** 618.580 locks de fila rebasan el umbral de escalada (~5.000):
+   el motor los sustituye por un lock exclusivo sobre **la tabla completa**, retenido hasta el
+   `COMMIT`. Con RCSI apagado, todo lector queda detrás. Verificar la política antes de
+   descartarlo: `sys.tables.lock_escalation_desc` valía `TABLE`.
+2. **Pérdida silenciosa de datos.** La sentencia inactivó filas que nadie pidió inactivar. Se
+   detectó porque el `UPDATE` defectuoso ponía `Inactive = 1` **sin** rellenar `InactiveDate`,
+   mientras que una baja de usuario sí la rellena: **618.528 de 618.580** filas del cajón tenían
+   esa firma, y ninguna quedó activa.
+
+> Esa asimetría es oro para el diagnóstico. **Cuando una tabla lleve una bandera de baja y su
+> fecha, comprobar siempre si hay filas con la bandera puesta y la fecha vacía**: separan lo que
+> hizo una persona de lo que hizo un `UPDATE` mal filtrado.
+
+```sql
+-- DETECCIÓN 1: ¿alguna columna de relación tiene un cajón de centinelas?
+SELECT IdPadre, Filas = COUNT(*)
+FROM dbo.TablaCaptura WITH (NOLOCK)
+GROUP BY IdPadre
+ORDER BY COUNT(*) DESC;
+
+-- DETECCIÓN 2: la firma del UPDATE mal filtrado
+SELECT Bandera_sin_fecha = SUM(CASE WHEN Inactive = 1 AND InactiveDate IS NULL     THEN 1 ELSE 0 END),
+       Bandera_con_fecha = SUM(CASE WHEN Inactive = 1 AND InactiveDate IS NOT NULL THEN 1 ELSE 0 END)
+FROM dbo.TablaCaptura WITH (NOLOCK);
+
+-- DETECCIÓN 3: tablas que escalarían a nivel de tabla
+SELECT name, lock_escalation_desc FROM sys.tables WHERE lock_escalation_desc = 'TABLE';
+```
+
+El arreglo es una condición, no una reescritura: **valida el identificador antes de escribir
+con él**. Y si el centinela es intencionado, entonces el predicado necesita además la columna
+que sí acota el alcance — un cajón compartido nunca es el alcance de una operación de usuario.
+
+Relacionada con R-12 (determinismo) por la misma raíz: un valor que se da por bueno sin
+comprobarlo. Y con R-04: cuanto más larga sea la transacción, más dura el lock escalado.
+
+## R-32 · Un predicado que no cubre el prefijo de ninguna clave [obs]
+
+**Severidad:** alta · **Impacto:** ×12 medido, y crece con la tabla
+
+La columna no va envuelta en ninguna función (R-01), la consulta es de tres tablas y el `JOIN`
+parece trivial. Aun así hay un scan. El motivo es más simple y se pasa por alto justo por eso:
+**se filtra por la segunda columna de una clave compuesta sin aportar la primera**.
+
+```sql
+-- La tabla: 5.975.400 filas, 16 índices, PK clustered (colA, colB)
+-- Ninguno de los 16 encabeza por colB.
+
+-- ANTI-PATRÓN
+SELECT TOP 1 d.col1, c.col2
+FROM   dbo.Hechos h WITH (NOLOCK)                  -- no aporta NINGUNA columna a la salida
+JOIN   dbo.Detalle d ON d.col1 = h.colB
+JOIN   dbo.Cabecera c ON c.id = d.id
+WHERE  h.colB = @b                                 -- ← falta colA: no hay prefijo buscable
+ORDER BY c.id;
+
+-- CORRECTO
+WHERE  h.colA = @a AND h.colB = @b                 -- ← seek por el PK
+```
+
+Medido: **25.919 lecturas lógicas para devolver 1 fila**, contra unas pocas con el predicado
+completo. En reloj de pared, **389 ms → 32 ms**, resultado idéntico. Coste estimado del plan:
+20,6.
+
+**Dos señales que lo delatan sin abrir el plan.** Un número de índices alto sobre la tabla
+(aquí 16) invita a suponer que "alguno servirá", y es precisamente lo que impide mirar cuál
+encabeza por la columna del filtro. Y un `JOIN` cuya tabla **no aporta ninguna columna al
+`SELECT`**: es un `EXISTS` disfrazado (R-21), y su coste no lo paga la salida sino el acceso.
+
+```sql
+-- DETECCIÓN: ¿alguna clave empieza por la columna que filtro?
+SELECT i.name, c.name AS PrimeraColumnaDeLaClave
+FROM   sys.indexes i
+JOIN   sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+JOIN   sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE  i.object_id = OBJECT_ID('dbo.Hechos')
+  AND  ic.key_ordinal = 1 AND ic.is_included_column = 0;
+```
+
+**El paralelismo lo estaba escondiendo, y eso es lo que hay que entender.** El scan costaba lo
+bastante para calificar a paralelismo y repartirse en 8 hilos: 171,7 ms de media durante
+1.072 ejecuciones. Al subir el `cost threshold` de la instancia a 50 —un cambio correcto, ver
+R-25— la sentencia dejó de calificar y pasó a plan serial: **381,1 ms, 2,2× más lenta**, sin que
+nadie hubiera tocado el código. Query Store guardaba los dos planes con sus ventanas de fechas.
+
+> **No revertir el parámetro.** Devuelve la cifra a su sitio y vuelve a gastar 8 núcleos en una
+> consulta que devuelve una fila. El arreglo es el predicado; con él, la sentencia deja de
+> depender de cómo esté configurado el paralelismo.
+
+**Cómo se demuestra la equivalencia cuando el `JOIN` sobrante es un filtro de existencia.**
+Añadir la columna que falta **restringe** el conjunto, así que las dos versiones **sí difieren**
+en la consulta aislada — medido: 1 fila contra 0. Comparar ahí da un falso negativo y frena una
+reescritura correcta. Hay que comparar **a nivel del resultado observable**: en el caso medido,
+el único consumidor de la tabla temporal ya filtraba por las dos columnas, de modo que la
+diferencia nunca alcanzaba ningún dato. La comprobación se hace en dos niveles —productor y
+consumidor— y se registran los dos.
+
+Y no era un caso de laboratorio: **1.567.526 valores de `colB` aparecían bajo más de un `colA`**.
+Cuando la divergencia es masiva, verificar solo el productor no es conservador: es equivocarse.
 
 ---
 
@@ -254,6 +424,26 @@ BEGIN CATCH
 END CATCH
 ```
 
+**Sub-caso: el `COMMIT` interno que no confirma nada.** Un procedimiento que se llama a sí mismo
+—o que llama a otro que abre transacción— deja el `COMMIT` interno corriendo con
+`@@TRANCOUNT > 1`. Ese `COMMIT` **sólo decrementa el contador**: no confirma, no libera un solo
+lock. Todo se sostiene hasta el `COMMIT` que lleva `@@TRANCOUNT` a 0.
+
+Observado: la rama «guardar y enviar» de un procedimiento abría transacción, generaba un HTML
+llamando a otro procedimiento y después se invocaba a sí misma; la llamada interna abría su
+propia transacción, ejecutaba 36 pasadas sobre una tabla de 61,6 M filas y hacía `COMMIT`. Leído
+de arriba abajo el código parece cerrar pronto. En realidad **nada se libera** hasta el commit
+externo, unas 100 líneas después.
+
+> Al medir la ventana de bloqueo de un procedimiento, no cuentes hasta el `COMMIT` que ves:
+> cuenta hasta el que deja `@@TRANCOUNT` en 0. Si el objeto puede ejecutarse anidado, son sitios
+> distintos.
+
+Corolario para el `ROLLBACK`: en esa misma estructura, un `ROLLBACK` del `CATCH` interno revierte
+la transacción **externa** completa. El flujo externo continúa creyendo que su transacción sigue
+viva y su `COMMIT` falla con error 3902 (*COMMIT sin BEGIN correspondiente*). `SAVE TRANSACTION`
+es la respuesta a esto, igual que arriba.
+
 ## R-11 · Un `CATCH` vacío es un error que nadie verá jamás [obs]
 
 Observado: varios `BEGIN CATCH` que solo hacen `ROLLBACK`, o que registran en bitácora y
@@ -272,6 +462,70 @@ se queda con una arbitraria.
 > Si usas `TOP`, pon `ORDER BY`. Si asignas una variable desde una tabla que *debería* tener una
 > fila, hazlo explícito y valida.
 
+**La trampa: el `ORDER BY` puede costar más que el no-determinismo.** `TOP 1` sin `ORDER BY`
+permite al motor **parar en la primera fila**; añadirlo le obliga a producir y ordenar el
+conjunto entero antes de descartarlo. Medido: sobre un `TOP 1` que atravesaba un *fan-out* de
+~590 filas de detalle por llamada, añadir `ORDER BY` para hacerlo determinista pasó de
+sub-segundo a **timeout por encima de 30 s** en un lote de 20.000 ejecuciones.
+
+Antes de "arreglar" un `TOP 1`, comprueba **cuántas filas puede devolver de verdad**. En ese
+mismo caso, las 46.455 entidades con actividad mapeaban a **exactamente un** valor cada una: el
+no-determinismo era teórico. Cuando ese es el escenario, la respuesta correcta no es un
+`ORDER BY` caro sino una **restricción de datos** que garantice la unicidad —o dejarlo
+documentado como riesgo conocido, con la cifra que lo acota—. Un arreglo que multiplica el
+coste por treinta no es un arreglo.
+
+**Y el escenario opuesto, medido: cuando la ambigüedad sí existe, el daño no se ve mirando una
+tabla.** El caso anterior decía que midieras la ambigüedad antes de arreglar. Aquí está la otra
+mitad de por qué: el mismo procedimiento resolvía **dos veces** el mismo identificador de
+catálogo, a partir de la misma columna origen, con **dos reglas de desempate distintas**, y
+escribía cada resultado en una tabla distinta dentro de la misma transacción.
+
+```sql
+-- Tabla A  (no determinista)
+SELECT TOP (1) … , destino = msl.SourceItemID
+FROM   dbo.Detalle d
+LEFT JOIN dbo.Mapeo msl ON msl.origen = d.origen AND msl.catalogo = @cat AND msl.Inactive = 0
+…                                              -- sin ORDER BY: el plan elige
+
+-- Tabla B  (determinista, pero con OTRA regla)
+… ROW_NUMBER() OVER (PARTITION BY … ORDER BY msl.SourceItemID ASC) AS rn
+WHERE rn = 1                                   -- siempre el mínimo
+```
+
+Mientras el mapeo sea 1:1 las dos coinciden y **nadie lo nota nunca**. Medido, no lo era: **244
+de 1.306 valores de origen tenían más de un destino activo**, uno de ellos hasta **163**, todos
+con el mismo tipo y el mismo catálogo —añadir un filtro no desambigua—. Consecuencia ya presente
+en los datos: **61.444 de 3.398.789 registros (1,81 %) tenían un valor distinto en cada tabla**,
+y para un único origen la tabla A había llegado a escribir **cuatro identificadores diferentes**
+según el registro (724.847 · 18.829 · 59 · 15).
+
+> La lección de detección: un `TOP 1` no determinista **no se delata en la tabla que escribe**,
+> porque cada fila parece correcta por separado. Se delata al **cruzar dos escrituras del mismo
+> dato**. Si un objeto resuelve el mismo identificador más de una vez, comprueba que todas las
+> resoluciones usan la misma regla — y si no, compara las tablas resultantes antes de suponer
+> que da igual.
+
+```sql
+-- DETECCIÓN 1: ¿el mapeo es realmente 1:1?
+SELECT COUNT(*) AS Origenes,
+       SUM(CASE WHEN Destinos > 1 THEN 1 ELSE 0 END) AS Ambiguos,
+       MAX(Destinos) AS MaxDestinos
+FROM  (SELECT origen, COUNT(DISTINCT destino) AS Destinos
+       FROM dbo.Mapeo WHERE catalogo = @cat AND Inactive = 0
+       GROUP BY origen) x;
+
+-- DETECCIÓN 2: ¿las dos escrituras del mismo dato coinciden?
+SELECT COUNT(*) AS Comparados,
+       SUM(CASE WHEN a.destino <> b.destino THEN 1 ELSE 0 END) AS Discrepan
+FROM dbo.TablaA a JOIN dbo.TablaB b ON b.k1 = a.k1 AND b.k2 = a.k2;
+```
+
+**Y el arreglo no lo elige quien optimiza.** Unificar la regla es trivial; decidir *cuál* de los
+N destinos es el correcto es negocio (R-29 y la nota de cierre de este catálogo). Entregar un
+script que elija por su cuenta es peor que no entregarlo: deja miles de filas «corregidas» hacia
+un valor que nadie validó.
+
 ## R-13 · `ORDER BY` en un `SELECT ... INTO #temp` se pierde [obs]
 
 El orden de lectura de una tabla temporal **no está garantizado**. Si el `ORDER BY` se aplica
@@ -282,7 +536,12 @@ Observado como consecuencia de una refactorización que movió una consulta a `#
 el `ORDER BY` al final. El defecto sobrevivió sin detectarse porque *a veces* el orden salía
 bien.
 
-## R-26 · `SET XACT_ABORT ON` en todo procedimiento con transacciones [gen]
+## R-26 · `SET XACT_ABORT ON` en todo procedimiento con transacciones [obs]
+
+Observado: un procedimiento de 2.183 líneas con **tres** bloques `BEGIN TRAN` y **cero**
+apariciones de `XACT_ABORT`. Declaraba `SET ARITHABORT ON` dos veces seguidas y `SET NOCOUNT ON`
+—alguien pensó en las opciones de sesión— pero no la que importaba. Es el patrón habitual: no
+se omite por criterio, se omite porque no está en la plantilla con la que se copió el objeto.
 
 Sin `XACT_ABORT`, un **timeout del cliente** aborta la ejecución **sin revertir la
 transacción**: la sesión queda con `@@TRANCOUNT > 0`, los bloqueos retenidos, y el pool de
@@ -327,6 +586,143 @@ WHERE definition LIKE '%BEGIN TRAN%'
 Complementa a R-04 (transacción corta) y R-10 (`SAVE TRANSACTION` para anidados): la
 transacción corta minimiza la ventana; `XACT_ABORT` garantiza que la ventana se cierre incluso
 cuando el cliente desaparece.
+
+**Sub-caso medido — la asimetría padre/hijo, que convierte el `CATCH` en un destructor de
+evidencia.** Lo peligroso no es que falte `XACT_ABORT` en todas partes; es que esté en **unos
+objetos sí y en otros no**. Observado: un orquestador sin `XACT_ABORT` que abre transacción y
+encadena diez `EXEC` anidados; los hijos **sí** lo activan.
+
+```sql
+-- El orquestador (SIN XACT_ABORT)
+BEGIN CATCH
+    ROLLBACK TRANSACTION Trans_X          -- ← incondicional, y con nombre
+    SET @msg = 'Error: ' + ERROR_MESSAGE();
+    EXEC dbo.RegistrarFallo @msg;         -- ← esta línea NUNCA se alcanza
+    ...
+END CATCH
+```
+
+Cuando un hijo revienta con su `XACT_ABORT ON`, la transacción llega al `CATCH` del padre **ya
+deshecha**. El `ROLLBACK` incondicional encuentra `@@TRANCOUNT = 0` y lanza el **error 3903**,
+que **escapa del propio `CATCH`**. El resultado es doble y silencioso: el cliente recibe el 3903
+en lugar del error real, y la llamada que registraría el fallo nunca se ejecuta. Un `CATCH` así
+no es un `CATCH` vacío (R-11): es peor, porque parece que registra.
+
+El nombre agrava lo mismo: `ROLLBACK TRANSACTION <nombre>` solo es válido si esa transacción es
+la más externa. Si cualquier llamador envuelve el procedimiento en la suya, falla con el
+**error 6401** — que es R-10 vista desde el otro extremo.
+
+```sql
+-- DETECCIÓN: ROLLBACK incondicional dentro de un CATCH
+SELECT OBJECT_NAME(object_id) AS objeto
+FROM   sys.sql_modules
+WHERE  definition LIKE '%BEGIN CATCH%'
+  AND  definition LIKE '%ROLLBACK%'
+  AND  definition NOT LIKE '%XACT_STATE%';
+
+-- Y el contraste que importa: padres sin XACT_ABORT que llaman a hijos que sí lo tienen
+SELECT OBJECT_NAME(m.object_id) AS padre
+FROM   sys.sql_modules m
+WHERE  m.definition LIKE '%BEGIN TRAN%'
+  AND  m.definition NOT LIKE '%XACT_ABORT%'
+  AND  EXISTS (SELECT 1 FROM sys.sql_expression_dependencies d
+               JOIN sys.sql_modules h ON h.object_id = d.referenced_id
+               WHERE d.referencing_id = m.object_id
+                 AND h.definition LIKE '%XACT_ABORT%');
+```
+
+`IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;` —sin nombre— resuelve los tres casos a la vez:
+transacción viva (`1`), condenada (`-1`) e inexistente (`0`).
+
+## R-30 · Un filtro nuevo se aplica a todas las condiciones hermanas, no solo a la que motivó el ticket [obs]
+
+**Severidad:** crítica · **Impacto:** resultados incorrectos, sin síntoma
+
+Cuando un cambio introduce un criterio de exclusión —«ignorar los registros inactivos»— hay que
+aplicarlo a **todas** las condiciones del objeto que responden a la misma pregunta de negocio.
+Aplicarlo solo a la consulta que se estaba mirando deja el objeto en contradicción consigo
+mismo, y el comentario del ticket certifica una intención que el código no cumple.
+
+```sql
+-- ANTI-PATRÓN: el mismo objeto, dos criterios distintos para el mismo concepto
+
+-- Consulta 1 — sí recibió el filtro nuevo
+SELECT @Plantilla = ...
+FROM dbo.Cabecera c
+WHERE c.EntidadID = @EntidadID
+  AND ISNULL(c.EstadoID, 0) NOT IN (6)
+  AND ISNULL(c.EstadoID, 0) <> @EstadoInactivo;      -- ← el ticket llegó hasta aquí
+
+-- Consulta 2 — misma pregunta de negocio, sin filtro alguno
+IF ... OR EXISTS (SELECT 1 FROM dbo.Cabecera c
+                  WHERE c.EntidadID = @EntidadID
+                    AND NOT EXISTS (SELECT 1 FROM dbo.Detalle d
+                                    WHERE d.CabeceraID = c.CabeceraID))
+    SELECT 0;                                         -- ← una cabecera inactiva y vacía manda aquí
+```
+
+Caso medido: una cabecera cancelada o inactiva **sin detalle** activaba la segunda condición y
+forzaba la respuesta negativa aunque la entidad tuviera trabajo válido cargado. Sobre **143.246
+entidades**, **3.546** respondían que no por esa condición y **3.410** habrían cambiado de
+respuesta con el filtro aplicado — el **2,4 %** del padrón. El defecto era anterior al ticket
+(la condición nunca filtró ni el primer estado), pero el ticket la dejó contradiciendo su
+propio enunciado.
+
+> Al revisar un cambio que añade un criterio, no leas solo el diff: **busca en todo el objeto
+> las demás condiciones que hablan del mismo concepto**. Si el ticket dice «excluir X», tienen
+> que excluir X todas, o el informe debe decir por qué no.
+
+```sql
+-- DETECCIÓN: objetos donde un estado aparece filtrado en unas condiciones y no en otras.
+-- Punto de partida, no veredicto: hay que leer el objeto.
+SELECT o.name AS objeto,
+       (LEN(m.definition) - LEN(REPLACE(m.definition, 'EstadoID', ''))) / 8  AS MencionesColumna,
+       (LEN(m.definition) - LEN(REPLACE(m.definition, 'NOT IN', '')))  / 6  AS FiltrosNegativos
+FROM sys.sql_modules m
+JOIN sys.objects o ON o.object_id = m.object_id
+WHERE m.definition LIKE '%EstadoID%'
+ORDER BY MencionesColumna DESC;
+```
+
+Complementa a R-07: allí la comparación con `NULL` desactiva una rama; aquí la rama funciona,
+pero contesta a una pregunta distinta de la que contestan sus hermanas.
+
+## R-31 · Una condición que ya es cierta dentro de su propia rama: el bloque que nunca decide [obs]
+
+**Severidad:** alta · **Impacto:** reglas de negocio que no se evalúan
+
+Un `OR` que incluye una condición ya garantizada por la rama en la que está es siempre cierto.
+Todo lo demás del `OR` se vuelve decorativo, y la rama contraria, inalcanzable.
+
+```sql
+-- ANTI-PATRÓN (estructura observada textualmente)
+IF NOT EXISTS (A) OR EXISTS (B)
+    SELECT 0
+ELSE
+    BEGIN
+        IF EXISTS (C) OR EXISTS (D) OR EXISTS (A)    -- ← A ya es TRUE por definición del ELSE
+            SELECT 1
+        ELSE
+            SELECT 0                                  -- ← inalcanzable
+    END
+```
+
+Entrar al `ELSE` significa `NOT(NOT A OR B)`, es decir `A AND NOT B`. Con `A` garantizado, el
+`OR` de tres términos es una constante: el bloque siempre devuelve 1. `C` y `D` **nunca deciden
+nada** — y en el caso observado `D` recorría una tabla de 75,7 M filas para eso. De siete
+consultas del procedimiento, **tres** no influían en el resultado.
+
+El razonamiento es seguro porque `EXISTS` devuelve siempre TRUE o FALSE, nunca UNKNOWN: no hay
+zona gris de lógica trivaluada donde esconderse.
+
+> El daño real no es el trabajo desperdiciado: es que alguien **añada o corrija una regla de
+> negocio dentro de un bloque que no se evalúa** y no entienda por qué no pasa nada. Un bloque
+> muerto atrae mantenimiento como si estuviera vivo.
+
+Detección: no hay consulta que lo encuentre. Se detecta leyendo cada `IF`/`ELSE` anidado y
+preguntándose qué es verdad, por construcción, al entrar en esa rama. Verificación barata antes
+de borrar: reproducir la lógica vieja y la nueva como expresiones `CASE` sobre un lote real y
+contrastarlas con `EXCEPT` en las dos direcciones (ver skill `analisis-bd`).
 
 ---
 
@@ -431,6 +827,46 @@ convierte el resto en `EXISTS`. Caso observado: unir a una tabla de 75 M filas p
 incluyendo la de detalle, cuando existía una tabla de 557 filas ya al grano correcto. El
 `GROUP BY` de 19 columnas desapareció con ella.
 
+**Contraejemplo medido: el arreglo no es automático.** El mismo movimiento —conducir desde la
+tabla pequeña y convertir el detalle en `EXISTS`— aplicado a un `TOP 1` que resolvía un
+identificador salió **peor**: **409.086 lecturas lógicas y 482,9 ms de CPU frente a 309.329 y
+394,2 ms** de la versión original, sobre un lote idéntico de 20.000 ejecuciones. El motivo:
+conducir desde una tabla de 52 filas obliga a **52 sondas semi-join por llamada**, mientras que
+la forma original hacía un solo `seek` por la clave y recorría secuencialmente un *fan-out*
+acotado que un índice ya cubría.
+
+> La regla aplica cuando el fan-out se **colapsa** después (un `GROUP BY` que hace de
+> `DISTINCT`). Cuando la consulta ya se corta sola —`TOP 1`, `EXISTS`— el fan-out está acotado
+> y darle la vuelta puede multiplicar el trabajo. **Mide antes de reescribir, y mide con
+> lecturas lógicas:** el reloj de pared no distingue estas dos formas bajo carga concurrente.
+
+**Cómo saber, objetivamente, que una consulta se le ha ido de las manos al optimizador.** No
+hace falta contar `JOIN`s a ojo: el plan lo declara. `StatementOptmEarlyAbortReason = TimeOut`
+significa que el optimizador **agotó su presupuesto de búsqueda** y entregó el mejor plan que
+tenía a mano, no el mejor plan. Medido en un `INSERT` que unía ~25 tablas con `CROSS APPLY`,
+`UNION ALL` y un `GROUP BY` de 30 columnas: compilar costaba **648 ms y 13.032 KB**, y en
+ejecución gastaba **43,4 ms de CPU sobre 54,5 ms transcurridos con solo 401 lecturas lógicas**
+—es cómputo, no E/S— con un *grant* de memoria de ~54 MB para devolver del orden de una fila.
+
+```sql
+-- DETECCIÓN sobre Query Store (ajustar el objeto)
+WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan'),
+PX AS (SELECT p.plan_id, CAST(p.query_plan AS XML) AS px
+       FROM sys.query_store_query q
+       JOIN sys.query_store_plan p ON p.query_id = q.query_id
+       WHERE q.object_id = OBJECT_ID('dbo.MiProc'))
+SELECT plan_id,
+       px.value('(/ShowPlanXML/BatchSequence/Batch/Statements/StmtSimple/QueryPlan/@CompileTime)[1]','int') AS CompileTime_ms,
+       px.value('(/ShowPlanXML/BatchSequence/Batch/Statements/StmtSimple/@StatementOptmEarlyAbortReason)[1]','varchar(50)') AS AbortoTemprano
+FROM PX;
+```
+
+> Dos trampas de esta detección. La primera: `CAST(query_plan AS XML)` **falla** con el error
+> 6335 si el plan supera los **128 niveles de anidamiento** — y una consulta capaz de eso ya te
+> ha respondido la pregunta. Filtra por sentencia, no por objeto. La segunda: el tiempo de
+> compilación se amortiza si el plan se reutiliza (648 ms entre 1.142 ejecuciones es 0,6 ms);
+> comprueba cuántos planes tiene la consulta antes de culpar a la compilación.
+
 ## R-21 · Subconsulta correlacionada en el `SELECT` que en realidad es un `EXISTS` [obs]
 
 ```sql
@@ -475,6 +911,13 @@ WHERE s.name = 'system_health' AND t.target_name = 'ring_buffer';
 
 En el XML: los nodos `<process>` muestran qué objetos esperaba cada víctima y en qué orden —
 ahí se lee directamente el cruce de órdenes.
+
+> **Trampa medida:** «ya están capturados, sin configurar nada» es cierto y engañoso a la vez.
+> `system_health` es un buzón compartido y su retención la fija el emisor más ruidoso, no los
+> deadlocks. En un entorno medido, el ring buffer cubría **15 minutos** y el archivo **14 días**
+> —contra 51 de uptime— porque el 95,3 % de sus eventos eran errores de seguridad. Un result
+> set vacío ahí **no significa que no hubo deadlocks**. Antes de concluir nada, mide la ventana
+> real: R-28.
 
 Mitigadores cuando el reordenamiento no es viable: acortar la transacción (R-04), índices que
 conviertan scans en seeks (menos filas bloqueadas), y `UPDLOCK` en el patrón
@@ -554,6 +997,104 @@ Tracking con 365 días de retención, que resultó ser el mayor consumidor de CP
 Comprueba además los cuatro valores que cambian el diagnóstico de cualquier análisis:
 compat level, RCSI, edición y si hay Always On. Están en `SKILL.md`.
 
+**Sub-caso medido — el default que apaga la única captura nativa de bloqueo.**
+`blocked process threshold (s)` viene de fábrica en `0`, y con ese valor el *blocked process
+report* no existe. En una instancia con **7 h 38 min** de espera por bloqueo acumuladas en 51
+días y una espera individual de **71,7 minutos**, no había ni un solo registro de quién
+bloqueaba a quién. Es la asimetría más común de estos entornos: el deadlock —raro, ruidoso, 4
+casos en 51 días— tiene herramienta y job; el bloqueo prolongado —frecuente, silencioso— no
+tiene nada.
+
+```sql
+SELECT name, value_in_use FROM sys.configurations
+WHERE name = 'blocked process threshold (s)';
+```
+
+Al encenderlo, el umbral se elige **con la duración media medida**, no por costumbre. Con
+`LCK_M_S` en 27 ms de media, un umbral de 5 s sería ruido puro; 15 s deja pasar el 99 % y
+captura la cola, que es la que produce incidentes.
+
+**Sub-caso medido — corregir la configuración no rompe nada: destapa lo que la configuración
+estaba tapando.** En otra instancia, `cost threshold` ya estaba subido a 50 y `MAXDOP` fijado en
+4 sobre 8 schedulers. Una consulta empezó a tardar **2,2×** más de un día para otro sin que
+nadie tocara el código: pasó de un plan paralelo a DOP 8 —171,7 ms de media, 1.072
+ejecuciones— a uno serial de **381,1 ms**, porque su coste (20,6) quedó por debajo del umbral
+nuevo. Query Store conservaba los dos planes con sus ventanas de fechas, que es la única razón
+por la que se pudo fechar el cambio.
+
+La lectura correcta no es "el ajuste fue malo". El scan que había debajo (R-32) siempre estuvo
+ahí; repartido en ocho hilos nadie lo miraba. **El ajuste retiró la anestesia.**
+
+> Al subir `cost threshold` en una instancia con historia, cuenta con que aparezcan consultas
+> "nuevas" en los informes de lentitud. No son nuevas: son las que vivían del paralelismo.
+> Arreglar el código y no revertir el parámetro — revertirlo devuelve la cifra a su sitio a
+> costa de seguir gastando N núcleos en consultas que devuelven una fila.
+
+---
+
+## R-28 · La instrumentación de diagnóstico también se audita [obs]
+
+Un buzón de diagnóstico compartido tiene la retención que le deja **su emisor más ruidoso**, no
+la que su dueño cree. `system_health` es el caso canónico: captura deadlocks, pero también
+errores de seguridad, conectividad y esperas largas. Si algo satura una de esas categorías, se
+lleva por delante a todas las demás.
+
+Medido en un entorno real: **12,7 millones de eventos en 51 días** (~249.000/día), de los que el
+**95,3 %** eran errores de impersonación repetitivos. Consecuencias, todas verificadas:
+
+| Efecto | Magnitud medida |
+|---|---|
+| Ventana del ring buffer en memoria | **15 min 50 s** |
+| Retención del archivo (techo 1 GB, 100 MB × 10) | **14 días**, contra 51 de uptime |
+| Deadlocks visibles en el ring buffer | **0**, habiendo ocurrido 4 en el periodo |
+| Coste de lectura del conjunto de `.xel` | **> 30 s**, supera el timeout de un cliente |
+
+El daño no es el ruido: es que **el vacío se lee como ausencia**. Un analizador de deadlocks
+contra esa fuente devuelve cero filas y alguien concluye «no hubo deadlocks», cuando lo correcto
+es «la evidencia ya rotó».
+
+> Antes de confiar en cualquier fuente de diagnóstico, **mide su ventana real**. Y para lo que
+> importe de verdad, **sesión dedicada**: un solo evento, archivo propio, `STARTUP_STATE = ON`.
+> Capturando decenas de eventos al año en vez de cientos de miles al día, unos pocos cientos de
+> MB son retención de años — y de paso el parseo deja de ser un problema.
+
+```sql
+SELECT TOP (1) f.file_name, f.object_name,
+       CAST(f.event_data AS xml).value('(/event/@timestamp)[1]','datetime2(0)') AS MasAntiguo
+FROM sys.fn_xe_file_target_read_file('system_health*.xel', NULL, NULL, NULL) AS f;
+```
+
+`TOP (1)` es deliberado: la función es de flujo y devuelve el primer evento sin recorrer el
+conjunto. Sin él, esta misma consulta es la que supera los 30 s.
+
+Dos corolarios que aplican a cualquier captura, no sólo a XE:
+
+- **Lo que no se persiste, no existe.** Un procedimiento de diagnóstico que devuelve un result
+  set y no escribe en ninguna parte produce evidencia que muere con la sesión. Comprobación
+  barata de si alguna vez se usó su ruta de persistencia: `sys.synonyms` y las tablas de salida
+  que crea. Si no están, nunca se invocó así.
+- **Query Store en modo `AUTO` descarta lo trivial.** Es el modo por defecto y es razonable,
+  pero tiene una consecuencia directa para el diagnóstico: **la ausencia de un statement en
+  Query Store no prueba que no se haya ejecutado**. En un objeto auditado se capturaron cuatro
+  de sus consultas y ninguna del bloque interno; concluir «ese bloque no corre» habría sido
+  exactamente el error que describe esta regla. Comprobar siempre
+  `sys.database_query_store_options.query_capture_mode_desc` antes de leer una ausencia como
+  un hecho, y anotar el número de ejecuciones capturadas: 60 ejecuciones no describen una hora
+  punta.
+- **El instrumento se mide a sí mismo.** Filtrar Query Store —o el plan cache— por un literal
+  que aparece en la consulta buscada hace que **la propia consulta de monitoreo coincida con su
+  filtro**. Caso real: una consulta de diagnóstico se auto-capturó y atribuyó sus **9.309
+  lecturas lógicas** de barrido sobre las vistas internas a la sentencia que pretendía medir,
+  inflando la cifra dos órdenes de magnitud. Antes de publicar una medición sacada así,
+  **imprime el texto de lo capturado y compruébalo**; y excluye el propio instrumento
+  (`AND qt.query_sql_text NOT LIKE '%query_store%'`) o usa marcadores mutuamente excluyentes.
+- **Un job informa hacia atrás; una alerta avisa en el momento.** Los contadores
+  `SQLServer:Locks / Number of Deadlocks/sec / _Total` y
+  `SQLServer:General Statistics / Processes blocked` sirven como condición de rendimiento en una
+  alerta de Agent. Lo que **no** funciona es alertar sobre el mensaje de error 1205: la víctima
+  de deadlock no se escribe en el log de errores por defecto, así que esa alerta no se dispara
+  nunca.
+
 ---
 
 ## Higiene — sin caso propio, pero se revisan siempre
@@ -564,6 +1105,7 @@ compat level, RCSI, edición y si hay Always On. Están en `SKILL.md`.
 | **[obs]** `SELECT *` | Enumerar columnas |
 | **[obs]** Columna sin calificar en un join de N tablas | Compila hoy; se rompe al añadir esa columna a otra tabla |
 | **[obs]** Regla de negocio por `LIKE '%texto%'` contra nombres traducibles | Columna bandera en el modelo. Se rompe en silencio al traducir |
+| **[obs]** Identificador de catálogo resuelto por su literal y degradado con `ISNULL(@id, -1)` | El `-1` convierte «no encontrado» en «no excluyas nada». Una corrección de traducción desactiva el filtro **sin error y sin rastro**. O se registra el caso no encontrado, o el identificador es constante. Peor aún si conviven ambos criterios: en un objeto observado dos estados iban escritos a mano y un tercero se buscaba por nombre |
 | **[gen]** `CONVERT(varchar, x)` sin longitud | Trunca a 30 caracteres en silencio |
 | **[gen]** Objetos sin calificar con esquema | `dbo.Tabla`, no `Tabla` |
 | **[gen]** Procedimiento con prefijo `sp_` | Renombrar: provoca búsqueda previa en `master` |
