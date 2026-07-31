@@ -9,6 +9,90 @@ señal de que son estilo del equipo y no descuidos.
 
 ---
 
+## v8 — 2026-07-30 · Reducir una copia de producción en un entorno de desarrollo
+
+**Origen:** plan de poda de una base de **305,72 GB usados** (345,90 asignados) restaurada desde
+producción a una instancia de desarrollo, con el objetivo de conservar solo los últimos 5 años.
+1.773 tablas, 1.096 FKs (132 no confiables), **432 heaps con 125,66 GB**, 554 índices no
+clusterizados con 96,40 GB, 3.758 procedimientos. SQL Server 2016 SP3, compat 130, Developer
+Edition, RCSI apagado, recovery `FULL` en un entorno de desarrollo. Análisis en solo lectura.
+
+Lo que hace distinta esta entrada: **la premisa de la que partía el trabajo era falsa, y medirla
+antes de planificar cambió el orden de todo el plan.** Se pedía una restauración parcial por
+fecha; `RESTORE ... WITH PARTIAL` opera sobre *filegroups* y la base tenía uno solo, sin
+particionamiento. Descartada esa vía, la pregunta pasó a ser cuánto libera el corte de 5 años — y
+resultó que **38,38 GB de la base no eran datos de ninguna antigüedad, sino páginas vacías**. La
+segunda tabla más grande, 24,82 GB, solo contenía cuatro meses y medio de historia: el corte por
+fecha no le quitaba ni una fila.
+
+**Ampliación del 2026-07-31.** El trabajo estaba cerrado cuando llegó la pregunta que lo puso a
+prueba: *¿esto hará que los aplicativos web vayan más rápido?* Medirlo cambió la conclusión del
+informe y produjo la única regla nueva de esta versión. Las tablas que concentraban los 119 GB
+recuperables registraban **0 búsquedas de la aplicación en 57 días** —solo escrituras—, y la
+única que la aplicación castigaba de verdad acumulaba **19.642.060 búsquedas y 0 escaneos**.
+La poda seguía justificándose por espacio, backup y tiempo de refresco; por rendimiento, no.
+
+**Regla nueva (1):**
+
+| Regla | Por qué se añadió |
+|---|---|
+| **R-33** Reducir volumen no es optimizar | El coste de una búsqueda en un índice es **logarítmico** respecto al número de filas y el de un escaneo es **lineal**: toda la ganancia de una reducción de datos se concentra en lo que hace escaneos, y si nada escanea la tabla la ganancia es cero. Medido: 5 tablas candidatas con 48,00 / 24,82 / 12,87 / 10,99 / 3,78 GB y **0 búsquedas** entre todas; una de ellas con **263.185 escrituras y 0 lecturas**. Trae una trampa de método que casi invierte el diagnóstico: **las consultas del propio análisis contaminan `dm_db_index_usage_stats`** — los únicos escaneos registrados llevaban marca de tiempo dentro de la ventana en que se corrieron los `COUNT(*)` de la auditoría, y sin mirar `last_user_scan` se habría concluido que la aplicación sí las lee. Y deja escrito qué **sí** compra una poda —backup, restore, `CHECKDB`, ciclo de refresco, disco—, que es operación y no experiencia de usuario |
+
+Los dos hallazgos de la primera pasada, en cambio, son sub-casos de reglas que ya existían: señal
+de que el catálogo va cubriendo el terreno.
+
+**Reglas reforzadas:**
+
+- **R-24** (heaps y bitácoras): el sub-caso **aritmético**, que no necesita ninguna DMV para
+  detectarse. `Paginas * 8192.0 / Filas` dio **81.528 bytes por fila** en una tabla sin columnas
+  LOB — diez veces el máximo de 8.060 que cabe en una fila. Solo puede ser espacio muerto:
+  3.252.900 páginas al **1,88 % de ocupación** para 326.677 filas, confirmado con
+  `avg_page_space_used_in_percent` en modo `SAMPLED` (`LIMITED` devuelve `NULL` ahí). El coste en
+  tiempo también se midió: **27 segundos para contar 326.677 filas**. Trae tres corolarios que
+  rompen planes de trabajo: **(1)** una poda por antigüedad sobre un heap no libera un byte sin
+  `REBUILD` posterior, así que toda estimación de ahorro que lo omita es ficción; **(2)** antes de
+  cortar por fecha hay que comprobar que la columna está poblada — una bitácora de **87.368.562
+  filas** tenía la suya en `NULL` en el **100 %**, y otra tabla mezclaba fechas de **1900** y
+  **8202**; **(3)** el peso no está donde están las filas: la mayor tabla tenía 2,79 M de filas y
+  **42,79 de sus 48 GB en unidades de asignación LOB**, lo que cambia qué técnica de borrado
+  conviene.
+- **R-22** (conversión implícita): el sub-caso de **modelo**, no de parámetro. La misma clave
+  lógica declarada `varchar(36)` en dos tablas y `uniqueidentifier` en una tercera de 10,83 GB,
+  **sin una sola FK entre las tres**. Coste medido sobre el mismo corte: **14,5 s** con conversión
+  frente a **5,0 s** entre las que comparten tipo. La relación se sostenía por convención: una
+  muestra de 20.000 filas emparejó el **99,8 %**, y el 0,2 % restante eran huérfanos que ninguna
+  restricción impedía. Corolario: comprobar el tipo en **toda** la cadena de tablas, no solo en
+  las dos que se están mirando, y medir cuántas filas emparejan cuando no hay FK que lo garantice.
+
+- **R-25** (configuración de la instancia): **Change Tracking, por segunda vez y en otra
+  instancia**, otra vez con 365 días de retención y otra vez como **el mayor consumidor de CPU
+  del servidor entero**: 9.161.864 ms —2 h 33 min— en 11.304 ejecuciones y 107.469.831 lecturas,
+  y esas cifras cubrían **3 días**, no el uptime. Habilitado en 4 bases con retenciones de 3, 7 y
+  365 días conviviendo. Que reaparezca en un entorno distinto es la señal de que 365 días no es
+  una decisión sino el valor que queda cuando nadie lo toca. Se añade su huella reconocible en el
+  plan cache —consultas con base nula sobre `internal_table_name` y `sys.syscommittab`, que no
+  tienen dueño aparente y por eso se pierden en cualquier informe ordenado por base— y la consulta
+  de `sys.change_tracking_databases`.
+- **R-14** (funciones escalares en un `SELECT`): el sub-caso de **cómo se lee en el plan cache**.
+  La UDF aparece **dos veces**, y la segunda es la reveladora: la consulta padre con **1
+  ejecución**, 144.692 ms de CPU y 131.460.437 lecturas, y el cuerpo de la función con **67.736
+  ejecuciones** y 128.092.455 lecturas. No son costes que se sumen: es el mismo trabajo visto
+  desde dentro, y una sola ejecución del padre se abrió en 67.736 llamadas en unos tres minutos.
+  Corolario de detección: una fila con un número de ejecuciones desproporcionado y un texto que
+  parece un fragmento suelto (`SELECT TOP 1 @variable = …`) casi siempre es el cuerpo de una UDF
+  escalar; buscar esa variable en `sys.sql_modules` la identifica.
+
+**Lo que se decidió NO promover:**
+
+- Que `RESTORE ... WITH PARTIAL` trabaje por filegroup es una característica documentada del motor,
+  no un anti-patrón de T-SQL. No pertenece a este catálogo.
+- Los 16,09 GB en 130 índices sin lecturas en 57 días **no se promovieron ni se propuso borrarlos**:
+  la medición venía de una instancia de **desarrollo**, y R-23 ya exige validar el uso antes de un
+  `DROP`. El matiz que sí quedó anotado en el informe, y que aquí importa: en una copia cuyo
+  propósito es reproducir producción, quitar índices cambia los planes y destruye justamente
+  aquello para lo que existe la copia. La decisión se toma sobre producción y se replica hacia
+  abajo, nunca al revés.
+
 ## v7 — 2026-07-30 · Un orquestador de carga reportado como lento
 
 **Origen:** análisis de rendimiento de un procedimiento orquestador —247 líneas, 10 `EXEC`

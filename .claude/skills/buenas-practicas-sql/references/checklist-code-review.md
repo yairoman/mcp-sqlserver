@@ -79,6 +79,8 @@ Cada punto enlaza con su regla en [`reglas.md`](reglas.md).
 - [ ] Antes de concluir «no hubo deadlocks», se midió la ventana real de la fuente · **R-28**
 - [ ] La captura que importa tiene sesión dedicada y `STARTUP_STATE = ON`, no comparte buzón · **R-28**
 - [ ] Lo que un job de diagnóstico encuentra se persiste en algún sitio · **R-28**
+- [ ] Si se propone una poda o archivado, se midió **quién lee** esas tablas antes de prometer rendimiento · **R-33**
+- [ ] Los escaneos que aparecen en `dm_db_index_usage_stats` no son los del propio análisis — comprobar `last_user_scan` · **R-33**
 
 ## Higiene
 
