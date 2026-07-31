@@ -9,6 +9,65 @@ señal de que son estilo del equipo y no descuidos.
 
 ---
 
+## v9 — 2026-07-31 · «¿Y esto hará que la web vaya más rápida?»
+
+**Origen:** continuación directa de v8. Cerrado el plan de poda, la pregunta del cliente fue si
+serviría para acelerar los aplicativos web. La respuesta medida fue que no, y esa negativa abrió la
+investigación útil: entonces **qué sí**. Instancia de 8 núcleos, 43 GB, 58 días encendida, SQL 2016
+SP3 Developer, compat 130. Análisis en solo lectura, **sin permiso `SHOWPLAN`**: ningún hallazgo se
+apoya en un plan de ejecución.
+
+Ninguna regla nueva: las cuatro reglas que cubren este terreno ya existían y todas salieron
+reforzadas con evidencia de otro tipo. Dos cosas hacen esta entrada distinta.
+
+**La primera: la configuración crítica ya estaba corregida.** `cost threshold` en 50, `MAXDOP` 4
+sobre 8 schedulers, `optimize for ad hoc` activo. Es la segunda vez que este catálogo se encuentra
+un entorno así (ver v7), y la lección se repite: cuando los parámetros están bien, lo que queda es
+código, y conviene decirlo pronto para que nadie siga buscando el interruptor mágico.
+
+**La segunda: la conclusión de v8 quedó confirmada por un camino independiente.** v8 dedujo que
+podar no aceleraría la aplicación mirando el **uso de índices**. v9 llegó a lo mismo mirando las
+**esperas**: `PAGEIOLATCH_SH` al 0,12 % frente al 12,14 % de paralelismo. Dos evidencias
+inconexas apuntando al mismo sitio valen mucho más que una.
+
+**Reglas reforzadas:**
+
+- **R-33** (reducir volumen no es optimizar): la **comprobación de dos minutos** que decide la
+  conversación entera, y que va antes que el uso de índices. `PAGEIOLATCH_*` cien veces por debajo
+  del paralelismo prueba que la instancia no espera por disco, y una base más pequeña solo ahorra
+  E/S. Se anota también el recíproco, que es la única forma honesta de rescatar el argumento
+  contrario: si `PAGEIOLATCH_*` sí pesa, la reducción de volumen vuelve a la mesa. Y el
+  `SOS_SCHEDULER_YIELD` con **99,85 % de espera por señal** como indicador de presión de CPU.
+- **R-14** (funciones escalares): el sub-caso de la **cadena**. La función medida llamaba a otras
+  dos funciones escalares, de modo que una invocación disparaba **hasta 4 consultas**, una vez por
+  fila. Trae tres cosas nuevas: **(1)** el descarte que ahorra semanas — las cinco tablas
+  recorridas sumaban 127 MB, ninguna llegaba a 79.000 filas y los índices exactos ya existían, así
+  que el problema era el número de invocaciones y ningún índice lo iba a arreglar; **(2)** el
+  alcance aparente engaña — una de las funciones de apoyo tenía **54 referencias**, pero con
+  sufijos `_BkUp`, `_notused`, `_Test`, `_prueba` y cinco con fecha en el nombre; **(3)** la receta
+  de reescritura verificada con `EXCEPT` en ambas direcciones, **0 diferencias en 3.000 casos**, y
+  su medición: **3.000 filas en 26.950 ms** por la vía escalar frente a **71.218 en 568 ms** por la
+  de conjunto. Con la advertencia de que no es un reemplazo transparente: cambia la forma de
+  invocar, así que hay que editar cada llamador.
+- **R-28** (la instrumentación se audita): el **caso inverso** de la regla. Hasta ahora recogía
+  «el vacío se lee como ausencia»; aquí **el ruido se lee como señal**. Las cinco esperas mayores
+  de `sys.dm_os_wait_stats` sumaban el **80,2 %** y ninguna era contención: sin filtrar, el
+  diagnóstico habría sido «esta instancia espera por Always On». Se añade la exigencia de mirar el
+  *signal wait* y el número de tareas, y una trampa aparte: **los totales del plan cache no cubren
+  el uptime** —`sys.dm_exec_query_stats` acumula desde `creation_time` de cada plan—, así que en
+  una misma foto convivían una fila con 3 días de historia y otra con minutos.
+- **R-25** (configuración de la instancia): confirmación de que 4 de los 5 parámetros críticos
+  estaban ya en su sitio, y que el que faltaba era otra vez `blocked process threshold` en **0**.
+  Refuerza el sub-caso que ya recogía la regla: es el parámetro que nadie toca, y sin él no hay
+  forma de saber quién bloqueó a quién cuando alguien reporte que la aplicación se quedó colgada.
+
+**Lo que se decidió NO promover:**
+
+- Encender RCSI. Es casi con seguridad la razón de fondo de los `NOLOCK` que aparecen en todo el
+  código revisado, pero proponerlo desde un entorno de desarrollo sería exactamente el error que
+  R-33 y v8 documentan: se decide sobre producción, con la medición de tempdb delante, y se replica
+  hacia abajo. Queda como pendiente en el informe, no como propuesta.
+
 ## v8 — 2026-07-30 · Reducir una copia de producción en un entorno de desarrollo
 
 **Origen:** plan de poda de una base de **305,72 GB usados** (345,90 asignados) restaurada desde

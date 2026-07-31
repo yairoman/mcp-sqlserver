@@ -766,6 +766,60 @@ visto desde dentro.
 Comprueba el compat level antes de estimar la ganancia: con 130 no hay inlining y la reescritura
 es la única salida.
 
+**Sub-caso medido — la cadena: una llamada, cuatro consultas.** La función escalar del caso
+anterior llamaba a su vez a **otras dos funciones escalares**:
+
+```
+FuncionPrincipal(@id)
+  +-- FuncionA(@id)      1 consulta  (2 tablas)
+  +-- FuncionB(@id)      2 consultas (2 tablas cada una)
+  +-- su propia consulta 1 consulta  (4 tablas)
+```
+
+Hasta **4 consultas por invocación**, y la invocación ocurre una vez por fila. Al medir el
+anidamiento con `sys.sql_expression_dependencies` apareció además que una de las funciones de
+apoyo tenía **54 referencias** en el esquema — cifra que asusta y frena la reescritura hasta que
+se mira de cerca: entre ellas había sufijos `_BkUp`, `_notused`, `_Test`, `_Preliminary`,
+`_prueba` y cinco con fecha en el nombre. **El alcance real de un cambio así casi siempre es
+mucho menor que el que devuelve el catálogo**; sepáralo con `sys.dm_exec_procedure_stats` y Query
+Store antes de dimensionar el trabajo.
+
+**El descarte que ahorra semanas: no son los índices.** Las cinco tablas que recorría la cadena
+sumaban **127 MB** y ninguna llegaba a 79.000 filas, con los índices exactos que los predicados
+necesitaban. El coste no estaba en lo que valía una llamada, sino en cuántas se hacían. Antes de
+proponer un índice, comprueba el tamaño de lo que se recorre: si es pequeño y está indexado, el
+problema es el número de invocaciones y ningún índice lo va a arreglar.
+
+**La receta de reescritura, verificada.** Resolver cada concepto como conjunto una sola vez y
+unir por la izquierda:
+
+```sql
+WITH ConjuntoA AS ( … ),          -- lo que resolvía FuncionA, para todas las claves
+     ConjuntoB AS ( … )           -- lo que resolvía FuncionB
+SELECT t.Clave,
+       Resultado = CASE WHEN a.Clave IS NOT NULL THEN 0
+                        WHEN EXISTS ( … predicado principal … ) THEN 1
+                        ELSE 0 END
+FROM   dbo.Tabla t
+       LEFT JOIN ConjuntoA a ON a.Clave = t.Clave
+       LEFT JOIN ConjuntoB b ON b.Clave = t.Clave;
+```
+
+Medido sobre datos reales, con `EXCEPT` en ambas direcciones y **0 diferencias** en 3.000 casos:
+
+| Versión | Filas resueltas | Duración | Por fila |
+|---|---:|---:|---:|
+| escalar | 3.000 | 26.950 ms | 8,98 ms |
+| de conjunto | 71.218 | **568 ms** | 0,008 ms |
+
+23,7 veces más filas en 47 veces menos tiempo.
+
+> ⚠️ **No es un reemplazo transparente.** Una función escalar se invoca `dbo.F(x) = 1`; una
+> inline, `OUTER APPLY dbo.F_v2(x)`. **No se intercambia con `sp_rename`**: hay que editar cada
+> llamador, y cada edición necesita su propio respaldo y su propia verificación. Convertir la
+> función quita la serialización del plan; la ganancia grande está en dejar de llamarla una vez
+> por fila. Son dos cambios distintos y conviene no confundirlos al estimar.
+
 ## R-15 · Funciones de tabla: inline, no multi-statement [obs]
 
 Observado: una función de tabla multi-statement (`RETURNS @tabla TABLE`) invocada con
@@ -1205,6 +1259,20 @@ Dos corolarios que aplican a cualquier captura, no sólo a XE:
   alerta de Agent. Lo que **no** funciona es alertar sobre el mensaje de error 1205: la víctima
   de deadlock no se escribe en el log de errores por defecto, así que esa alerta no se dispara
   nunca.
+- **El caso inverso: aquí el ruido se lee como señal.** `sys.dm_os_wait_stats` devuelve mezcladas
+  las esperas reales y las de tareas de fondo que simplemente esperan trabajo. Medido en una
+  instancia: **las cinco esperas mayores sumaban el 80,2 % del total y ninguna era contención**
+  —`HADR_*`, `BROKER_TRANSMITTER`, `LOGMGR_QUEUE`—, tapando por completo el paralelismo que sí
+  importaba. Leído sin filtrar, el diagnóstico habría sido «esta instancia espera por Always On».
+  Filtra siempre con la lista de exclusión conocida antes de ordenar por porcentaje, y añade dos
+  columnas que la lectura ingenua olvida: el **signal wait** de cada espera —el porcentaje de
+  tiempo que la tarea ya estaba lista y solo esperaba CPU— y el número de tareas, que distingue
+  «muchas esperas cortas» de «una espera eterna».
+- **Los totales del plan cache no cubren el uptime.** `sys.dm_exec_query_stats` acumula desde
+  `creation_time` de **cada plan**, no desde el arranque del servidor. En una misma foto convivían
+  una fila con 3 días de historia y otra con unos minutos. Sirve para ordenar por magnitud; sumar
+  sus totales y presentarlos como «el consumo del periodo» es un error. Incluye `creation_time`
+  en toda consulta al plan cache que vaya a un informe.
 
 ---
 
@@ -1263,6 +1331,26 @@ Y antes de dar por bueno el diagnóstico, comprueba **dónde está de verdad el 
 mismo entorno, el mayor consumidor de CPU del servidor era la limpieza de Change Tracking
 (R-25) y el segundo una función escalar en un `SELECT` (R-14). Ninguno de los dos mejora un
 gramo al reducir volumen de datos.
+
+**La comprobación de dos minutos que decide la conversación entera.** Antes que el uso de
+índices, antes que cualquier conteo: mira cuánto pesa la espera por lectura de página.
+
+| Espera medida en el entorno del caso | % del total |
+|---|---:|
+| `CXPACKET` + `CXCONSUMER` | **12,14 %** |
+| `LATCH_EX` | 4,39 % |
+| `SOS_SCHEDULER_YIELD` | 1,15 % *(99,85 % de ella es señal)* |
+| **`PAGEIOLATCH_SH`** | **0,12 %** |
+
+> Reducir el tamaño de una base reduce E/S. Si la instancia **no espera por E/S**, la reducción no
+> se nota. `PAGEIOLATCH_*` cien veces por debajo del paralelismo es la prueba, y llega por un
+> camino independiente del uso de índices: dos evidencias distintas apuntando a lo mismo.
+
+El recíproco también vale, y es la única forma de rescatar el argumento: si `PAGEIOLATCH_*` sí
+pesa, la reducción de volumen vuelve a la mesa. Mídelo antes de decidir, no después.
+
+Un `SOS_SCHEDULER_YIELD` casi enteramente de **señal** —la tarea ya estaba lista y esperaba
+turno de CPU— apunta a presión de CPU, que se ataca por consultas y no por hardware.
 
 ---
 
