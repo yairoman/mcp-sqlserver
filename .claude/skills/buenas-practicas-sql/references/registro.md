@@ -9,6 +9,355 @@ señal de que son estilo del equipo y no descuidos.
 
 ---
 
+## v12 — 2026-08-11 · El procedimiento que se abrió por lento y resultó estar mal
+
+**Origen:** continuación directa de v11. El benchmark de migración detectó que el paralelismo era el
+74 % de la espera de la instancia y lo localizó en una base que aquel trabajo no había auditado: el
+**0,065 % de sus ejecuciones consumía el 53,6 % de su CPU**. Al abrir el segundo consumidor —un
+proceso diario de sustitución de auditorías, ~600 líneas, 14 tablas temporales, 38 `NOLOCK`, cuatro
+bases referenciadas— la investigación de rendimiento se convirtió en otra cosa.
+
+**Ninguna regla nueva; una reforzada a fondo y tres entradas de higiene.** El hallazgo no necesitaba
+un número propio: es R-29 —escritura masiva fuera de alcance— llegando por un camino que la regla no
+contemplaba.
+
+**Regla reforzada:**
+
+- **R-29** (identificador sin validar en una escritura masiva): sub-caso nuevo, **la precedencia de
+  `AND` sobre `OR`**. Hasta ahora la regla cubría el valor centinela; aquí las condiciones de alcance
+  estaban todas escritas y correctas, pero **sin paréntesis**, de modo que el motor evaluaba
+  `(A AND B AND C AND D) OR (E OR F)` y cualquier fila que cumpliera `E` se saltaba el filtro de
+  lote y la marca de baja. Medido sobre una tabla de **1.249.450 filas** con 48 lotes: el `UPDATE`
+  tocaba **58.910 filas en vez de 4.992** —doce veces el alcance—, de ellas **32.338 marcadas como
+  inactivas**, y alcanzaba **los 48 lotes** en lugar de uno. En un proceso diario que **sobrescribe
+  columnas en vez de insertar filas**, así que no deja rastro propio.
+
+  Aporta además el agravante que lo mantuvo invisible durante quién sabe cuánto: en el mismo `WHERE`,
+  una condición escrita `col = 'PREFIJO%'` en lugar de `LIKE` coincidía con **0 filas** donde debía
+  coincidir con **39.988**. **Los dos defectos se tapaban entre sí** —uno ampliaba el alcance, el
+  otro apagaba la condición que lo habría hecho notorio— de modo que el resultado nunca fue lo
+  bastante raro como para que alguien lo mirara. De ahí la instrucción operativa: cuando encuentres
+  uno de los dos, busca el otro en la misma cláusula.
+
+**Higiene — tres entradas nuevas:**
+
+- **`=` con comodín** (`col = 'PREFIJO%'`). El inverso del `LIKE` sin comodines que ya estaba, y el
+  peligroso de los dos: no da error, solo devuelve cero filas. 0 contra 39.988, repetido 3 veces en
+  el mismo objeto.
+- **`DELETE`/`UPDATE` con `LEFT JOIN` y `WHERE col NOT IN (...)`**. Doble fallo con `NULL`: el
+  `LEFT JOIN` degenera en `INNER JOIN`, y un solo `NULL` en la subconsulta hace que no se borre nada.
+- Ambas se detectan comparando conteos, que es lo que las hace baratas de auditar.
+
+**Lo que no se promovió, y por qué.** El resto de hallazgos del caso ya estaban cubiertos y no
+aportaban sub-caso: la tabla de 1,25 M de filas con **cero índices no agrupados** consultada 8 veces
+por columnas que la clave agrupada no cubre es R-32 literal; los 38 `NOLOCK` en lecturas que deciden
+escrituras son R-09; el `TOP 1` sin `ORDER BY` que elige el lote a procesar es R-12; las 14 tablas
+temporales sin índice son R-16; los **16 de 36 índices sin una sola lectura** son R-23 —con su
+límite bien puesto: 66 h de medición no descartan un índice mensual—. Que seis reglas distintas
+aparezcan juntas en un solo objeto es, en sí, la observación de la v1: no son descuidos aislados,
+son el estilo por defecto.
+
+**Y una nota metodológica que confirma v11.** Este objeto se localizó porque el delta de esperas de
+la instancia contradijo la conclusión sacada de Query Store de una sola base. La regla añadida
+entonces —*el alcance de la evidencia tiene que cubrir el alcance de la afirmación*— es lo que hizo
+posible este trabajo tres horas después.
+
+---
+
+## v11 — 2026-08-11 · «Migramos el fin de semana, ¿es mejor?»
+
+**Origen:** benchmark post-migración de dos versiones mayores, pedido tres días después del
+cambio. 49 bases restauradas en un fin de semana sobre un servidor nuevo —8 núcleos, 45 GB,
+Developer, **RTM sin ningún CU**, Always On— con **63 h de uptime** al medir. Solo lectura, sin
+permiso `SHOWPLAN` y sin acceso a `msdb`. Es la primera entrada de la serie que **compara dos
+instancias distintas**, y solo fue posible porque Query Store viaja dentro del backup: el
+historial de 30 días medido en el motor viejo llegó con las bases.
+
+**Una regla nueva y una reforzada.** Lo que distingue esta entrada es que el resultado contradecía
+la intuición en las dos direcciones. Se esperaba «la versión nueva es más rápida» y se midió
+**×1,76 de duración**; se dedujo entonces «el hardware nuevo es peor» y resultó ser **mejor**: las
+mismas consultas leían un **26 % menos páginas** y el disco respondía en **0,48 ms**.
+
+**Regla nueva:**
+
+- **R-35** (una migración mueve los datos, no la puesta a punto). Aporta cuatro cosas.
+  **(1)** El inventario de qué viaja dentro del backup, qué se queda y qué se resetea — y por qué
+  lo que viaja es lo peligroso: las estadísticas llegan **con su `modification_counter` intacto**,
+  así que parecen correctas por el mero hecho de estar. Medido: **2.190 de 2.331** estadísticas
+  con más de 30 días, **39 con más modificaciones pendientes que filas tiene la tabla**, máximo de
+  **241 días** y muestreos del **1,6 %**. **(2)** La firma diagnóstica, que es lo que hace la regla
+  memorable: **menos lecturas y más tiempo** no es hardware peor, es hardware mejor ejecutando
+  planes peores. **(3)** El control que lo demuestra —aislar las consultas cuyo I/O no cambió
+  (±5 %)—, que acotó la parte atribuible al servidor a un **17–33 %** con la mayoría sin cambio, y
+  sin el cual el informe habría culpado a la máquina nueva. **(4)** El orden de remediación:
+  estadísticas primero, CU después, compat level al final, porque subir el compat con histogramas
+  de 241 días es evaluar un optimizador nuevo con datos falsos.
+
+  El coste del compat level quedó cuantificado y deja de ser un argumento teórico: **43 de 45
+  bases** seguían en el nivel del motor anterior, y una sola base tenía **176 funciones escalares y
+  46 TVF multi-sentencia frente a 9 TVF inline** — con **cuatro funciones escalares entre los
+  objetos más degradados**, una de ellas con **1.130.562 ejecuciones diarias**. Es exactamente lo
+  que el compat nuevo resuelve sin tocar T-SQL (R-14, R-19), y estaba desactivado.
+
+  Se descartó por medición la hipótesis intuitiva: `cost threshold` había caído de 50 a 5 en la
+  instancia nueva, pero el paralelismo era **0,016 %** de las ejecuciones frente al 0,005 % previo.
+  La regresión de configuración es real y se documentó (R-25), pero no era la causa.
+
+**Regla reforzada:**
+
+- **R-28** (la instrumentación se audita): sub-caso nuevo y de aplicación general — **la
+  herramienta del que mira**. Hasta ahora la regla cubría el instrumento propio auto-capturándose;
+  aquí el ruido lo mete otra persona con SSMS abierto. Las **dos consultas con peor regresión de
+  todo el conjunto** (**×10,71 y ×38,69**, con el I/O pasando de 931 a 5.909 y de 400 a 4.968)
+  eran del **Object Explorer** —firma `@_msparam_n` sobre alias `clmns`—, y encabezaban el ranking
+  precisamente porque nadie navegaba ese servidor antes de migrarlo. Publicadas sin filtrar habrían
+  descrito una degradación muy superior a la real. Queda el filtro
+  (`NOT LIKE '%msparam%'`), la separación por `object_id` entre código del negocio y ad-hoc, y la
+  regla general que las engloba a todas: **antes de dar por buena una consulta de la lista de
+  peores, lee su texto**.
+
+**Lo que no se promovió.** Los 25 índices que el motor recomendaba: se acumularon en 63 h y con las
+estadísticas obsoletas descritas en R-35, de modo que son propuestas para compensar estimaciones
+falsas. Medirlos de nuevo tras actualizar estadísticas es parte del plan de acción, no una regla.
+
+### Adenda — la primera ejecución del script de verificación corrigió el informe
+
+Tres horas después de entregar el paquete, el cliente ejecutó `99_verificacion.sql` y devolvió su
+salida. Esa segunda captura, restada de la primera, **invalidó una conclusión y destapó un defecto
+en la propia métrica de seguimiento**. Ambas cosas se promueven a **R-28**, que gana tres
+sub-casos más:
+
+- **La media sobre una población que crece deriva sola.** El informe proponía seguir
+  «0,975 ms → objetivo 0,700 ms». En 3 h **sin aplicar nada**, esa cifra bajó a **0,733 ms**: la
+  población comparable había pasado de **301 a 482 consultas** al acumular ejecuciones, y las
+  nuevas eran más baratas. Un 25 % de mejora inexistente. **El factor, en cambio, no se movió:
+  ×1,76 → ×1,74.** De ahí la regla: la métrica de un antes/después es el **cociente de cada
+  consulta contra sí misma**, nunca el agregado absoluto. Se añade también la **caducidad**: la
+  ventana «antes» muere con la retención de Query Store, así que o se exporta o la medición deja
+  de poder rehacerse.
+- **Query Store es por base; las esperas son de la instancia.** El error propio, y el más
+  instructivo. Del 0,016 % de ejecuciones paralelas en la base auditada se concluyó «paralelismo
+  descartado». Dato correcto, conclusión falsa: el delta de esperas de la **instancia** puso
+  `CXCONSUMER`+`CXSYNC_PORT`+`CXPACKET` en el **74 % de la espera real**, originado en otra base de
+  las 49. Antes de descartar un mecanismo, comprobar que el alcance de la evidencia cubre el
+  alcance de la afirmación.
+- **Un porcentaje de ejecuciones no mide un porcentaje de coste.** En la base culpable, el
+  **0,065 % de las ejecuciones consumía el 53,6 % del CPU**: doce sentencias, la primera con
+  **326.997.111 lecturas lógicas por ejecución** y 2.907 s de CPU en **dos** ejecuciones. Con el
+  corolario que evita el arreglo equivocado: subir `cost threshold` frena lo trivial, no lo que
+  cuesta órdenes de magnitud más que el umbral.
+
+**Y una lección de proceso, sin regla propia:** el script de verificación no es papeleo de cierre.
+Aquí fue el instrumento que corrigió el informe que lo acompañaba, tres horas después de
+entregarlo. Un paquete sin `99_verificacion.sql` habría dejado las tres conclusiones erróneas en
+pie indefinidamente.
+
+---
+
+## v10 — 2026-08-06 · «Va muy lento desde hace dos días»
+
+**Origen:** reporte de usuarios, sin objeto señalado y sin más pista que la fecha. Misma
+instancia que v9 —8 núcleos, 43 GB, SQL 2016 SP3 Developer, compat 130—, ahora con 63 días
+encendida. Solo lectura, **sin permiso `SHOWPLAN`**. Query Store estaba activo en
+`READ_WRITE` con 30 días de retención en las cuatro bases calientes, y **es la razón por la que
+esta investigación pudo concluir algo**: sin él, el hallazgo principal no era demostrable.
+
+**Una regla nueva y dos reforzadas.** Lo que hace distinta esta entrada es el error que estuvo a
+punto de cometerse. Las tres primeras horas apuntaban a los dos consumidores de CPU más obvios
+—un colector de monitorización y la limpieza de Change Tracking de una base recién clonada—,
+ambos reales, ambos fechados dentro de la ventana reportada, ambos con cifras espectaculares. La
+medición de CPU los descartó como causa del síntoma: **13 % de media y cero minutos por encima
+del 80 %**. Un servidor ocioso no explica usuarios parados; lo explica un servidor **esperando**.
+
+**Regla nueva:**
+
+- **R-34** (una consulta lenta con CPU casi nula está esperando). Seis sentencias de pantallas
+  de búsqueda con **22.141 ms de duración media contra 0,4 ms de CPU y 6 lecturas lógicas** —una
+  relación de **55.000×**—, incluido un `INSERT` de una fila en una tabla de 4 MB que tardaba
+  23,7 s. Aporta cuatro cosas: **(1)** el razonamiento aritmético que cierra el diagnóstico sin
+  necesidad de capturar el bloqueo, porque una sentencia que toca 6 páginas no puede tardar 22 s
+  por sí misma; **(2)** la inversión de la lectura habitual — **la CPU baja del servidor es el
+  síntoma, no la prueba de salud**; **(3)** por qué las DMV de sesión no valen aquí: un muestreo
+  de 31 s registró **0 ms** de bloqueo y las cadenas salieron limpias con el problema activo, así
+  que sólo Query Store, que conserva duración **y** CPU, permite el diagnóstico a posteriori; y
+  **(4)** la tabla de descartes —cliente que no consume, consulta remota, espera por memoria—,
+  sin la cual la regla sería una corazonada. Con `RCSI` apagado en 8 de 8 bases y
+  `lock_escalation = TABLE` en 13 de 13 tablas, el mecanismo queda cerrado.
+
+**Reglas reforzadas:**
+
+- **R-25** (configuración por defecto): **tercera aparición** de los 365 días de Change Tracking,
+  y por fin con el mecanismo de propagación visible. Una copia de base heredó **72 tablas con CT,
+  759 MB de tablas laterales, 18.177.132 filas y la retención completa**, duplicando el coste de
+  limpieza de la instancia al mismo ritmo exacto de 144 ejecuciones/hora. Que reaparezca por
+  tercera vez ya no es un descuido: es lo que pasa por defecto al clonar. Se añade además la
+  **técnica de fechado** que resolvió la investigación — cruzar `creation_time` del plan cache
+  contra `create_date` de `sys.databases` fechó el cambio con **14 minutos** de precisión, sin
+  depender de que nadie recordara qué se hizo.
+- **R-28** (la instrumentación se audita): dos sub-casos. El primero invierte la regla —hasta
+  ahora trataba la instrumentación como fuente que se degrada; aquí **era el consumo**: una
+  métrica de monitorización interrogando el historial de respaldos cada 10 s se llevaba
+  **80.377,8 s de CPU y 20.000 millones de lecturas en 66 h**, recorriendo 98 veces por ejecución
+  una tabla de 67 MB. Con el corolario que lo hace invisible: esas filas tienen `dbid` nulo y se
+  caen de todo informe ordenado por base. El segundo es metodológico y de aplicación general:
+  **las esperas acumuladas no pueden fechar una regresión** —63 días de uptime diluyen dos días
+  por un factor de 30—, y lo que sí funciona son dos capturas restadas (`CXPACKET`+`CXCONSUMER`
+  al **84 %** en una ventana de 31 s, frente al 11,5 % del acumulado) y Query Store agregado
+  **comparando laborables contra laborables**, que dio 1,10 ms → 1,89 ms por sentencia y señaló
+  el día. Contrastar una segunda base descartó la causa de instancia: la vecina no se movió.
+
+**Lo que se decidió NO promover.** El entorno tenía material de sobra —97,1 % de lotes provocando
+compilación, 55 h de CPU compilando en 30 días en una sola base, un `UPDATE` entre bases con 11
+planes distintos en 9 días (de 1,6 ms a 597.892 ms), 172 triggers, 21 sesiones abandonadas—. Nada
+de eso subió al catálogo: o ya está cubierto por R-06, R-19 y R-23, o no se pudo medir su efecto
+sobre el síntoma reportado. **Un consumidor grande no es una causa mientras no se demuestre que
+alimenta el síntoma**, que es precisamente la lección de esta entrada.
+
+---
+
+## v9 — 2026-07-31 · «¿Y esto hará que la web vaya más rápida?»
+
+**Origen:** continuación directa de v8. Cerrado el plan de poda, la pregunta del cliente fue si
+serviría para acelerar los aplicativos web. La respuesta medida fue que no, y esa negativa abrió la
+investigación útil: entonces **qué sí**. Instancia de 8 núcleos, 43 GB, 58 días encendida, SQL 2016
+SP3 Developer, compat 130. Análisis en solo lectura, **sin permiso `SHOWPLAN`**: ningún hallazgo se
+apoya en un plan de ejecución.
+
+Ninguna regla nueva: las cuatro reglas que cubren este terreno ya existían y todas salieron
+reforzadas con evidencia de otro tipo. Dos cosas hacen esta entrada distinta.
+
+**La primera: la configuración crítica ya estaba corregida.** `cost threshold` en 50, `MAXDOP` 4
+sobre 8 schedulers, `optimize for ad hoc` activo. Es la segunda vez que este catálogo se encuentra
+un entorno así (ver v7), y la lección se repite: cuando los parámetros están bien, lo que queda es
+código, y conviene decirlo pronto para que nadie siga buscando el interruptor mágico.
+
+**La segunda: la conclusión de v8 quedó confirmada por un camino independiente.** v8 dedujo que
+podar no aceleraría la aplicación mirando el **uso de índices**. v9 llegó a lo mismo mirando las
+**esperas**: `PAGEIOLATCH_SH` al 0,12 % frente al 12,14 % de paralelismo. Dos evidencias
+inconexas apuntando al mismo sitio valen mucho más que una.
+
+**Reglas reforzadas:**
+
+- **R-33** (reducir volumen no es optimizar): la **comprobación de dos minutos** que decide la
+  conversación entera, y que va antes que el uso de índices. `PAGEIOLATCH_*` cien veces por debajo
+  del paralelismo prueba que la instancia no espera por disco, y una base más pequeña solo ahorra
+  E/S. Se anota también el recíproco, que es la única forma honesta de rescatar el argumento
+  contrario: si `PAGEIOLATCH_*` sí pesa, la reducción de volumen vuelve a la mesa. Y el
+  `SOS_SCHEDULER_YIELD` con **99,85 % de espera por señal** como indicador de presión de CPU.
+- **R-14** (funciones escalares): el sub-caso de la **cadena**. La función medida llamaba a otras
+  dos funciones escalares, de modo que una invocación disparaba **hasta 4 consultas**, una vez por
+  fila. Trae tres cosas nuevas: **(1)** el descarte que ahorra semanas — las cinco tablas
+  recorridas sumaban 127 MB, ninguna llegaba a 79.000 filas y los índices exactos ya existían, así
+  que el problema era el número de invocaciones y ningún índice lo iba a arreglar; **(2)** el
+  alcance aparente engaña — una de las funciones de apoyo tenía **54 referencias**, pero con
+  sufijos `_BkUp`, `_notused`, `_Test`, `_prueba` y cinco con fecha en el nombre; **(3)** la receta
+  de reescritura verificada con `EXCEPT` en ambas direcciones, **0 diferencias en 3.000 casos**, y
+  su medición: **3.000 filas en 26.950 ms** por la vía escalar frente a **71.218 en 568 ms** por la
+  de conjunto. Con la advertencia de que no es un reemplazo transparente: cambia la forma de
+  invocar, así que hay que editar cada llamador.
+- **R-28** (la instrumentación se audita): el **caso inverso** de la regla. Hasta ahora recogía
+  «el vacío se lee como ausencia»; aquí **el ruido se lee como señal**. Las cinco esperas mayores
+  de `sys.dm_os_wait_stats` sumaban el **80,2 %** y ninguna era contención: sin filtrar, el
+  diagnóstico habría sido «esta instancia espera por Always On». Se añade la exigencia de mirar el
+  *signal wait* y el número de tareas, y una trampa aparte: **los totales del plan cache no cubren
+  el uptime** —`sys.dm_exec_query_stats` acumula desde `creation_time` de cada plan—, así que en
+  una misma foto convivían una fila con 3 días de historia y otra con minutos.
+- **R-25** (configuración de la instancia): confirmación de que 4 de los 5 parámetros críticos
+  estaban ya en su sitio, y que el que faltaba era otra vez `blocked process threshold` en **0**.
+  Refuerza el sub-caso que ya recogía la regla: es el parámetro que nadie toca, y sin él no hay
+  forma de saber quién bloqueó a quién cuando alguien reporte que la aplicación se quedó colgada.
+
+**Lo que se decidió NO promover:**
+
+- Encender RCSI. Es casi con seguridad la razón de fondo de los `NOLOCK` que aparecen en todo el
+  código revisado, pero proponerlo desde un entorno de desarrollo sería exactamente el error que
+  R-33 y v8 documentan: se decide sobre producción, con la medición de tempdb delante, y se replica
+  hacia abajo. Queda como pendiente en el informe, no como propuesta.
+
+## v8 — 2026-07-30 · Reducir una copia de producción en un entorno de desarrollo
+
+**Origen:** plan de poda de una base de **305,72 GB usados** (345,90 asignados) restaurada desde
+producción a una instancia de desarrollo, con el objetivo de conservar solo los últimos 5 años.
+1.773 tablas, 1.096 FKs (132 no confiables), **432 heaps con 125,66 GB**, 554 índices no
+clusterizados con 96,40 GB, 3.758 procedimientos. SQL Server 2016 SP3, compat 130, Developer
+Edition, RCSI apagado, recovery `FULL` en un entorno de desarrollo. Análisis en solo lectura.
+
+Lo que hace distinta esta entrada: **la premisa de la que partía el trabajo era falsa, y medirla
+antes de planificar cambió el orden de todo el plan.** Se pedía una restauración parcial por
+fecha; `RESTORE ... WITH PARTIAL` opera sobre *filegroups* y la base tenía uno solo, sin
+particionamiento. Descartada esa vía, la pregunta pasó a ser cuánto libera el corte de 5 años — y
+resultó que **38,38 GB de la base no eran datos de ninguna antigüedad, sino páginas vacías**. La
+segunda tabla más grande, 24,82 GB, solo contenía cuatro meses y medio de historia: el corte por
+fecha no le quitaba ni una fila.
+
+**Ampliación del 2026-07-31.** El trabajo estaba cerrado cuando llegó la pregunta que lo puso a
+prueba: *¿esto hará que los aplicativos web vayan más rápido?* Medirlo cambió la conclusión del
+informe y produjo la única regla nueva de esta versión. Las tablas que concentraban los 119 GB
+recuperables registraban **0 búsquedas de la aplicación en 57 días** —solo escrituras—, y la
+única que la aplicación castigaba de verdad acumulaba **19.642.060 búsquedas y 0 escaneos**.
+La poda seguía justificándose por espacio, backup y tiempo de refresco; por rendimiento, no.
+
+**Regla nueva (1):**
+
+| Regla | Por qué se añadió |
+|---|---|
+| **R-33** Reducir volumen no es optimizar | El coste de una búsqueda en un índice es **logarítmico** respecto al número de filas y el de un escaneo es **lineal**: toda la ganancia de una reducción de datos se concentra en lo que hace escaneos, y si nada escanea la tabla la ganancia es cero. Medido: 5 tablas candidatas con 48,00 / 24,82 / 12,87 / 10,99 / 3,78 GB y **0 búsquedas** entre todas; una de ellas con **263.185 escrituras y 0 lecturas**. Trae una trampa de método que casi invierte el diagnóstico: **las consultas del propio análisis contaminan `dm_db_index_usage_stats`** — los únicos escaneos registrados llevaban marca de tiempo dentro de la ventana en que se corrieron los `COUNT(*)` de la auditoría, y sin mirar `last_user_scan` se habría concluido que la aplicación sí las lee. Y deja escrito qué **sí** compra una poda —backup, restore, `CHECKDB`, ciclo de refresco, disco—, que es operación y no experiencia de usuario |
+
+Los dos hallazgos de la primera pasada, en cambio, son sub-casos de reglas que ya existían: señal
+de que el catálogo va cubriendo el terreno.
+
+**Reglas reforzadas:**
+
+- **R-24** (heaps y bitácoras): el sub-caso **aritmético**, que no necesita ninguna DMV para
+  detectarse. `Paginas * 8192.0 / Filas` dio **81.528 bytes por fila** en una tabla sin columnas
+  LOB — diez veces el máximo de 8.060 que cabe en una fila. Solo puede ser espacio muerto:
+  3.252.900 páginas al **1,88 % de ocupación** para 326.677 filas, confirmado con
+  `avg_page_space_used_in_percent` en modo `SAMPLED` (`LIMITED` devuelve `NULL` ahí). El coste en
+  tiempo también se midió: **27 segundos para contar 326.677 filas**. Trae tres corolarios que
+  rompen planes de trabajo: **(1)** una poda por antigüedad sobre un heap no libera un byte sin
+  `REBUILD` posterior, así que toda estimación de ahorro que lo omita es ficción; **(2)** antes de
+  cortar por fecha hay que comprobar que la columna está poblada — una bitácora de **87.368.562
+  filas** tenía la suya en `NULL` en el **100 %**, y otra tabla mezclaba fechas de **1900** y
+  **8202**; **(3)** el peso no está donde están las filas: la mayor tabla tenía 2,79 M de filas y
+  **42,79 de sus 48 GB en unidades de asignación LOB**, lo que cambia qué técnica de borrado
+  conviene.
+- **R-22** (conversión implícita): el sub-caso de **modelo**, no de parámetro. La misma clave
+  lógica declarada `varchar(36)` en dos tablas y `uniqueidentifier` en una tercera de 10,83 GB,
+  **sin una sola FK entre las tres**. Coste medido sobre el mismo corte: **14,5 s** con conversión
+  frente a **5,0 s** entre las que comparten tipo. La relación se sostenía por convención: una
+  muestra de 20.000 filas emparejó el **99,8 %**, y el 0,2 % restante eran huérfanos que ninguna
+  restricción impedía. Corolario: comprobar el tipo en **toda** la cadena de tablas, no solo en
+  las dos que se están mirando, y medir cuántas filas emparejan cuando no hay FK que lo garantice.
+
+- **R-25** (configuración de la instancia): **Change Tracking, por segunda vez y en otra
+  instancia**, otra vez con 365 días de retención y otra vez como **el mayor consumidor de CPU
+  del servidor entero**: 9.161.864 ms —2 h 33 min— en 11.304 ejecuciones y 107.469.831 lecturas,
+  y esas cifras cubrían **3 días**, no el uptime. Habilitado en 4 bases con retenciones de 3, 7 y
+  365 días conviviendo. Que reaparezca en un entorno distinto es la señal de que 365 días no es
+  una decisión sino el valor que queda cuando nadie lo toca. Se añade su huella reconocible en el
+  plan cache —consultas con base nula sobre `internal_table_name` y `sys.syscommittab`, que no
+  tienen dueño aparente y por eso se pierden en cualquier informe ordenado por base— y la consulta
+  de `sys.change_tracking_databases`.
+- **R-14** (funciones escalares en un `SELECT`): el sub-caso de **cómo se lee en el plan cache**.
+  La UDF aparece **dos veces**, y la segunda es la reveladora: la consulta padre con **1
+  ejecución**, 144.692 ms de CPU y 131.460.437 lecturas, y el cuerpo de la función con **67.736
+  ejecuciones** y 128.092.455 lecturas. No son costes que se sumen: es el mismo trabajo visto
+  desde dentro, y una sola ejecución del padre se abrió en 67.736 llamadas en unos tres minutos.
+  Corolario de detección: una fila con un número de ejecuciones desproporcionado y un texto que
+  parece un fragmento suelto (`SELECT TOP 1 @variable = …`) casi siempre es el cuerpo de una UDF
+  escalar; buscar esa variable en `sys.sql_modules` la identifica.
+
+**Lo que se decidió NO promover:**
+
+- Que `RESTORE ... WITH PARTIAL` trabaje por filegroup es una característica documentada del motor,
+  no un anti-patrón de T-SQL. No pertenece a este catálogo.
+- Los 16,09 GB en 130 índices sin lecturas en 57 días **no se promovieron ni se propuso borrarlos**:
+  la medición venía de una instancia de **desarrollo**, y R-23 ya exige validar el uso antes de un
+  `DROP`. El matiz que sí quedó anotado en el informe, y que aquí importa: en una copia cuyo
+  propósito es reproducir producción, quitar índices cambia los planes y destruye justamente
+  aquello para lo que existe la copia. La decisión se toma sobre producción y se replica hacia
+  abajo, nunca al revés.
+
 ## v7 — 2026-07-30 · Un orquestador de carga reportado como lento
 
 **Origen:** análisis de rendimiento de un procedimiento orquestador —247 líneas, 10 `EXEC`

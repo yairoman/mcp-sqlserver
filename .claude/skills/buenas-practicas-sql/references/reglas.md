@@ -258,6 +258,51 @@ centinela concentraba **618.580 filas** frente a una media de **12 por identific
 > fecha, comprobar siempre si hay filas con la bandera puesta y la fecha vacía**: separan lo que
 > hizo una persona de lo que hizo un `UPDATE` mal filtrado.
 
+### El otro camino al mismo desenlace: `AND` liga más fuerte que `OR`
+
+El centinela no es la única forma de que una escritura se salga de su alcance. La segunda es
+puramente sintáctica y **no se ve leyendo el código en diagonal**, porque las condiciones correctas
+están todas ahí — solo que no todas son obligatorias.
+
+```sql
+-- ANTI-PATRÓN [obs]: cuatro condiciones y una disyunción, sin un solo paréntesis
+UPDATE T SET col1 = 2, col2 = ISNULL(o.col3, '0')
+FROM dbo.Tabla T
+    INNER JOIN dbo.Otra o ON T.OtraID = o.OtraID
+WHERE T.EsHistorico = 0
+  AND T.LoteGUID    = @Lote          -- ← el lote
+  AND T.Inactive    = 0              -- ← la marca de baja
+  AND ISNULL(o.col4, 0) > 0
+   OR (o.TipoID = 45 OR o.TipoNombre = 'PREFIJO%')   -- ← desde aquí NADA de lo anterior aplica
+```
+
+El motor lo evalúa como `(A AND B AND C AND D) OR (E OR F)`. Toda fila que cumpla `E` entra
+**sin** pasar por el lote ni por la marca de baja. Medido en el caso real, sobre una tabla de
+**1.249.450 filas** con 48 lotes:
+
+| Alcance del `UPDATE` | Filas |
+|---|---:|
+| Previsto — un lote, solo activas | **4.992** |
+| Real — la rama `OR` sin filtrar | **58.910** |
+| De ellas, con `Inactive = 1` | **32.338** |
+| Lotes alcanzados | **48 de 48** |
+
+Doce veces el alcance previsto, en un proceso diario, **sobrescribiendo columnas en vez de insertar
+filas** — así que no deja rastro propio y no hay forma de saber cuántas veces ocurrió. La firma que
+sí queda: filas marcadas como inactivas con columnas que solo ese `UPDATE` escribe.
+
+> **Regla práctica:** en el `WHERE` de un `UPDATE` o un `DELETE`, **cualquier `OR` va entre
+> paréntesis, sin excepción**. No es estilo: es la diferencia entre una condición alternativa y una
+> puerta trasera que se salta todos los filtros de alcance. Y al revisar, no basta con comprobar que
+> los filtros de alcance *están* — hay que comprobar que son *obligatorios*.
+
+**El agravante que lo mantuvo invisible.** En el mismo `WHERE`, la condición `o.TipoNombre =
+'PREFIJO%'` usa `=` contra una cadena con comodín: coincide con **0 filas** donde `LIKE` coincidiría
+con **39.988**. Los dos defectos se tapan mutuamente. El de precedencia ampliaba el alcance de la
+escritura; el del operador apagaba la única condición que habría hecho útil esa ampliación, de modo
+que el resultado nunca fue lo bastante raro como para que alguien lo mirara. **Cuando encuentres uno
+de los dos, busca el otro en la misma cláusula.**
+
 ```sql
 -- DETECCIÓN 1: ¿alguna columna de relación tiene un cajón de centinelas?
 SELECT IdPadre, Filas = COUNT(*)
@@ -744,6 +789,82 @@ constantes (IDs de catálogo) una sola vez.
 > distintas) y el join habría duplicado inserciones. Usa `OUTER APPLY ... TOP 1` cuando no
 > puedas garantizar unicidad.
 
+**Sub-caso medido — la UDF aparece dos veces en el plan cache, y la segunda es la que asusta.**
+Una consulta de una base de reporting llamaba a una función escalar declarada en **otra base**
+desde su lista de `SELECT`. En `sys.dm_exec_query_stats` conviven dos filas:
+
+| Fila | Ejecuciones | CPU total | Lecturas |
+|---|---:|---:|---:|
+| La consulta padre | **1** | 144.692 ms | 131.460.437 |
+| El cuerpo de la UDF | **67.736** | 104.777 ms | 128.092.455 |
+
+**Una sola ejecución de la consulta padre se abrió en 67.736 ejecuciones de la función, en unos
+tres minutos**, a 1.891 lecturas cada una. Las 128 M de lecturas de la segunda fila son
+prácticamente las mismas 131 M de la primera: no son costes que se sumen, es el mismo trabajo
+visto desde dentro.
+
+> Al ordenar el plan cache por CPU, una fila con un número de ejecuciones desproporcionado
+> respecto a las demás y un texto que parece un fragmento suelto —`SELECT TOP 1 @variable = …`—
+> casi siempre es el cuerpo de una UDF escalar. Buscar ese `@variable` en `sys.sql_modules`
+> identifica la función; `sys.objects.type_desc = 'SQL_SCALAR_FUNCTION'` lo confirma.
+
+Comprueba el compat level antes de estimar la ganancia: con 130 no hay inlining y la reescritura
+es la única salida.
+
+**Sub-caso medido — la cadena: una llamada, cuatro consultas.** La función escalar del caso
+anterior llamaba a su vez a **otras dos funciones escalares**:
+
+```
+FuncionPrincipal(@id)
+  +-- FuncionA(@id)      1 consulta  (2 tablas)
+  +-- FuncionB(@id)      2 consultas (2 tablas cada una)
+  +-- su propia consulta 1 consulta  (4 tablas)
+```
+
+Hasta **4 consultas por invocación**, y la invocación ocurre una vez por fila. Al medir el
+anidamiento con `sys.sql_expression_dependencies` apareció además que una de las funciones de
+apoyo tenía **54 referencias** en el esquema — cifra que asusta y frena la reescritura hasta que
+se mira de cerca: entre ellas había sufijos `_BkUp`, `_notused`, `_Test`, `_Preliminary`,
+`_prueba` y cinco con fecha en el nombre. **El alcance real de un cambio así casi siempre es
+mucho menor que el que devuelve el catálogo**; sepáralo con `sys.dm_exec_procedure_stats` y Query
+Store antes de dimensionar el trabajo.
+
+**El descarte que ahorra semanas: no son los índices.** Las cinco tablas que recorría la cadena
+sumaban **127 MB** y ninguna llegaba a 79.000 filas, con los índices exactos que los predicados
+necesitaban. El coste no estaba en lo que valía una llamada, sino en cuántas se hacían. Antes de
+proponer un índice, comprueba el tamaño de lo que se recorre: si es pequeño y está indexado, el
+problema es el número de invocaciones y ningún índice lo va a arreglar.
+
+**La receta de reescritura, verificada.** Resolver cada concepto como conjunto una sola vez y
+unir por la izquierda:
+
+```sql
+WITH ConjuntoA AS ( … ),          -- lo que resolvía FuncionA, para todas las claves
+     ConjuntoB AS ( … )           -- lo que resolvía FuncionB
+SELECT t.Clave,
+       Resultado = CASE WHEN a.Clave IS NOT NULL THEN 0
+                        WHEN EXISTS ( … predicado principal … ) THEN 1
+                        ELSE 0 END
+FROM   dbo.Tabla t
+       LEFT JOIN ConjuntoA a ON a.Clave = t.Clave
+       LEFT JOIN ConjuntoB b ON b.Clave = t.Clave;
+```
+
+Medido sobre datos reales, con `EXCEPT` en ambas direcciones y **0 diferencias** en 3.000 casos:
+
+| Versión | Filas resueltas | Duración | Por fila |
+|---|---:|---:|---:|
+| escalar | 3.000 | 26.950 ms | 8,98 ms |
+| de conjunto | 71.218 | **568 ms** | 0,008 ms |
+
+23,7 veces más filas en 47 veces menos tiempo.
+
+> ⚠️ **No es un reemplazo transparente.** Una función escalar se invoca `dbo.F(x) = 1`; una
+> inline, `OUTER APPLY dbo.F_v2(x)`. **No se intercambia con `sp_rename`**: hay que editar cada
+> llamador, y cada edición necesita su propio respaldo y su propia verificación. Convertir la
+> función quita la serialización del plan; la ganancia grande está en dejar de llamarla una vez
+> por fila. Son dos cambios distintos y conviene no confundirlos al estimar.
+
 ## R-15 · Funciones de tabla: inline, no multi-statement [obs]
 
 Observado: una función de tabla multi-statement (`RETURNS @tabla TABLE`) invocada con
@@ -889,6 +1010,29 @@ mata el seek. Es el caso más común en aplicaciones .NET/EF, que envían `NVARC
 
 Detección: buscar `CONVERT_IMPLICIT` en el plan, o comparar los tipos de parámetro y columna.
 
+**Sub-caso medido — la misma clave lógica declarada con tres tipos, y sin una sola FK que lo
+sujete.** Un identificador de negocio estaba definido como `varchar(36)` en dos tablas y como
+`uniqueidentifier` en una tercera de 10,83 GB y 7,6 M de filas. Unirlas obliga a convertir en cada
+fila. Coste medido sobre el mismo corte de datos: **14,5 s** con conversión frente a **5,0 s**
+entre las dos tablas que sí comparten tipo.
+
+Lo que convierte esto en un hallazgo de modelo y no solo de rendimiento: **no existía ninguna
+clave foránea entre las tres**. La relación se sostenía por convención. Se verificó con una
+muestra de 20.000 filas que la conversión empareja el **99,8 %** — el 0,2 % restante eran
+huérfanos que ninguna restricción impedía.
+
+```sql
+SELECT COUNT(*) AS Muestra,
+       SUM(CASE WHEN p.Clave IS NOT NULL THEN 1 ELSE 0 END) AS ConPadre
+FROM   (SELECT TOP (20000) Clave FROM dbo.Hija) h
+       LEFT JOIN dbo.Padre p ON p.Clave = CAST(h.Clave AS varchar(36));
+```
+
+> Antes de unir dos tablas por un identificador "obvio", comprueba el tipo en **todas** las tablas
+> de la cadena, no solo en las dos que estás mirando. `validate_data_types` lo resuelve de una
+> pasada. Y si la unión no está respaldada por una FK, mide primero cuántas filas emparejan: la
+> convención puede llevar años rota sin que nadie lo note.
+
 ## R-27 · Orden de acceso consistente entre procedimientos [gen]
 
 Dos procesos que escriben las mismas tablas **en orden inverso** son un deadlock esperando su
@@ -984,6 +1128,51 @@ Detección: `sys.dm_db_partition_stats` sin fila con `index_id = 1`. Antes de co
 `forwarded_record_count` con `sys.dm_db_index_physical_stats(..., 'DETAILED')` fuera de horario
 pico.
 
+**Sub-caso medido — el heap que ocupa 50× lo que contiene, y la división que lo delata.** En una
+base de 305 GB, la segunda tabla más grande ocupaba **24,82 GB con 326.677 filas**: 3.252.900
+páginas al **1,88 % de ocupación**. No tenía columnas LOB. La comprobación que lo destapa es una
+división, no una DMV:
+
+```sql
+SELECT Filas, Paginas, BytesPorFila = Paginas * 8192.0 / Filas
+```
+
+**81.528 bytes por fila, diez veces el máximo de 8.060 que cabe en una fila de SQL Server.** Es
+aritméticamente imposible que sean datos: solo pueden ser páginas que el heap nunca devolvió tras
+borrados anteriores. Confirmación con `avg_page_space_used_in_percent` en modo `SAMPLED` — el modo
+`LIMITED` devuelve `NULL` en esa columna y no sirve.
+
+El coste no es solo disco: contar esas 326.677 filas tardó **27 segundos**, porque el motor
+recorre las 3.252.900 páginas. Un `REBUILD` las deja en ~61.000. Tres heaps del mismo entorno
+sumaban **38,38 GB de aire** y 5.407.300 *forwarded records*; el conjunto eran 432 heaps con
+125,66 GB.
+
+> **La consecuencia que rompe planes de trabajo:** una poda por antigüedad sobre un heap **no
+> libera ni un byte** sin `ALTER TABLE ... REBUILD` después. Las filas desaparecen y el archivo
+> mide lo mismo. Si un plan de reducción de datos no incluye ese paso, su estimación de ahorro es
+> ficción.
+
+Y antes de planificar el corte, **verifica que la columna de fecha está poblada**: en la misma
+base, una bitácora de **87.368.562 filas** tenía su única columna de fecha en `NULL` en el
+**100 %** de ellas. Cortar por ella no habría borrado nada. Una sola consulta lo descarta:
+
+```sql
+SELECT COUNT(*) AS Total,
+       SUM(CASE WHEN Fecha IS NULL THEN 1 ELSE 0 END) AS Nulas,
+       MIN(Fecha) AS Minima, MAX(Fecha) AS Maxima
+FROM   dbo.Bitacora;
+```
+
+Esa misma consulta destapó, en otra tabla del dominio, fechas de **1900** y de **8202**
+conviviendo: un corte por antigüedad habría borrado las primeras —probablemente registros válidos
+sin fecha poblada— y conservado las segundas para siempre.
+
+**Y no des por hecho que el peso está donde están las filas.** La mayor de todas —48 GB— tenía
+2,79 M de filas y **42,79 GB en unidades de asignación LOB**: 17 KB de HTML por fila. Con
+`allocation_units.type = 2` se separa en una consulta lo que es fila de lo que es LOB, y cambia
+por completo qué técnica de borrado conviene: ahí el coste está en mover el LOB, no en el log de
+transacciones.
+
 ## R-25 · La configuración por defecto de la instancia no es la correcta [obs]
 
 Observado: `cost threshold for parallelism = 5` —el default de fábrica desde 1998— y
@@ -996,6 +1185,50 @@ Tracking con 365 días de retención, que resultó ser el mayor consumidor de CP
 
 Comprueba además los cuatro valores que cambian el diagnóstico de cualquier análisis:
 compat level, RCSI, edición y si hay Always On. Están en `SKILL.md`.
+
+**Sub-caso medido — Change Tracking, por segunda vez y en otra instancia.** La retención de 365
+días volvió a aparecer, y otra vez como **el mayor consumidor de CPU de todo el servidor**:
+**9.161.864 ms** —2 h 33 min— en 11.304 ejecuciones y 107.469.831 lecturas, y con una advertencia
+que multiplica la cifra: esas estadísticas cubrían **3 días**, no el uptime completo, porque el
+plan se había creado tres días antes. Estaba habilitado en 4 bases, con retenciones de 3, 7 y 365
+días conviviendo sin criterio aparente.
+
+Que reaparezca en un entorno distinto no es casualidad: **365 días no es una decisión, es lo que
+queda cuando nadie toca el valor al habilitar la característica.** Revísalo por instancia, no por
+base.
+
+```sql
+SELECT DB_NAME(database_id) AS BaseDeDatos, is_auto_cleanup_on,
+       retention_period, retention_period_units_desc
+FROM   sys.change_tracking_databases;
+```
+
+La huella en el plan cache es reconocible: consultas con `databaseName` nulo sobre
+`internal_table_name`, `start_time` o `sys.syscommittab`. No tienen dueño aparente porque son
+tareas internas del motor, y por eso se pasan por alto en cualquier informe ordenado por base.
+
+**Sub-caso medido — clonar una base clona su configuración de Change Tracking.** Tercera
+aparición de los 365 días, y esta vez con el mecanismo de propagación a la vista. Se creó una
+copia de una base productiva; la copia heredó **72 tablas con Change Tracking, 759 MB de tablas
+laterales, 18.177.132 filas pendientes y la retención de 365 días**, cifras idénticas a las del
+original hasta el tercer dígito. Desde ese momento la instancia paga **el doble** de limpieza:
+5.762,8 s de CPU y 68.676.119 lecturas en 6.789 ejecuciones, al **mismo ritmo exacto de 144
+ejecuciones/hora** que el plan de la base original.
+
+Nadie decidió 365 días para la copia. Nadie decidió nada: se clonó.
+
+> Cuando aparezca una base nueva en una instancia —copia, restauración, refresco de entorno—
+> revisa `sys.change_tracking_databases` **el mismo día**. Una copia hereda el coste permanente
+> de limpieza de su origen, y ese coste no aparece atribuido a ninguna consulta de negocio.
+
+**La técnica de fechado, que vale para cualquier regresión.** El plan de `sys.sp_add_ct_history`
+correspondiente a la copia nació **14 minutos** después de crearse la base (12:45:36 → 12:59:04).
+Cruzar `creation_time` del plan cache contra `create_date` de `sys.databases` fecha el cambio con
+precisión de minutos, sin necesidad de que nadie recuerde qué se hizo:
+
+```sql
+SELECT name, create_date FROM sys.databases WHERE create_date >= DATEADD(day,-7,GETDATE());
+```
 
 **Sub-caso medido — el default que apaga la única captura nativa de bloqueo.**
 `blocked process threshold (s)` viene de fábrica en `0`, y con ese valor el *blocked process
@@ -1088,12 +1321,383 @@ Dos corolarios que aplican a cualquier captura, no sólo a XE:
   inflando la cifra dos órdenes de magnitud. Antes de publicar una medición sacada así,
   **imprime el texto de lo capturado y compruébalo**; y excluye el propio instrumento
   (`AND qt.query_sql_text NOT LIKE '%query_store%'`) o usa marcadores mutuamente excluyentes.
+- **Y la variante que no es tuya: la herramienta del que mira.** El sub-caso anterior se corrige
+  excluyendo el propio instrumento; éste no, porque el ruido lo mete **otra persona con SSMS
+  abierto**. El Object Explorer y los diálogos de propiedades emiten consultas de catálogo
+  parametrizadas —firma inconfundible: parámetros `@_msparam_n` y lecturas sobre alias como
+  `clmns`, `tbl`, `sch`— que Query Store registra como carga igual que las del negocio. Caso
+  medido al comparar un antes/después de migración: **las dos consultas con peor regresión de
+  todo el conjunto (×10,71 y ×38,69, con el I/O multiplicándose de 931 a 5.909 y de 400 a 4.968)
+  eran del Object Explorer**, y aparecían en cabeza precisamente porque nadie navegaba ese
+  servidor antes de migrarlo. Publicadas sin filtrar habrían descrito una degradación mucho peor
+  que la real. Excluye siempre `AND qt.query_sql_text NOT LIKE '%msparam%'`, y separa lo que
+  tiene `object_id` —código del negocio, procedimientos y funciones— del ad-hoc, que es donde se
+  esconden las herramientas. La regla general: **antes de dar por buena una consulta de la lista
+  de peores, lee su texto**. Un ranking de Query Store no distingue quién ejecutó qué.
+- **Una media sobre una población que crece deriva sola.** Es la trampa más silenciosa de un
+  antes/después, porque produce una mejora que nadie ha hecho. Al comparar dos ventanas se filtra
+  por un mínimo de ejecuciones (`>= 100`) para quitar ruido — y ese conjunto **se agranda con el
+  tiempo**, según cada consulta acumula ejecuciones. Medido: en **3 horas**, sin tocar la
+  configuración, la población comparable pasó de **301 a 482 consultas** y la duración media
+  ponderada bajó de **0,975 ms a 0,733 ms**. Un 25 % de «mejora» que era aritmética de población:
+  las consultas que entraron eran más baratas que la media. **Lo que sí se mantuvo fue el factor:
+  ×1,76 → ×1,74.** Regla: en cualquier comparación antes/después, **la métrica de seguimiento es
+  el cociente de cada consulta contra sí misma, no el agregado en milisegundos**. El cociente se
+  normaliza solo; el absoluto solo es comparable contra su propia población, que ya no existe.
+  Y si la comparación se apoya en Query Store, anota su **fecha de caducidad**: la ventana
+  «antes» desaparece cuando cumple la retención, así que o se exporta a una tabla propia o la
+  medición deja de poder rehacerse.
+- **Query Store es por base; las esperas son de la instancia. No refutes una con la otra.** Error
+  cometido y corregido en una investigación real: se midió que solo el **0,016 %** de las
+  ejecuciones de la base auditada usaba plan paralelo y se concluyó «el paralelismo está
+  descartado». El dato era correcto y la conclusión falsa — un delta de esperas de 3 h sobre la
+  **instancia** mostró `CXCONSUMER`+`CXSYNC_PORT`+`CXPACKET` en **11.001.672 ms de 14.840.213, el
+  74 % de toda la espera real**. Venía de otra base, de 49, que no se había mirado. Antes de
+  descartar un mecanismo con evidencia de Query Store, comprueba que **el alcance de la evidencia
+  cubre el alcance de la afirmación**; si la señal es de instancia, la refutación también tiene
+  que serlo.
+- **Un porcentaje de ejecuciones no mide un porcentaje de coste.** El corolario del punto anterior,
+  y lo que hacía engañoso el 0,016 %. En la base culpable, el **0,065 % de las ejecuciones**
+  (6.671 de 10.273.280) consumía el **53,6 % del CPU** de esa base: doce sentencias, encabezadas
+  por una de **326.997.111 lecturas lógicas por ejecución** que en **2 ejecuciones** se llevó
+  2.907 s de CPU. Ordena siempre por **coste total** —`avg_cpu_time * count_executions`—, nunca
+  por número de ejecuciones. Y no confundas el arreglo: subir `cost threshold for parallelism`
+  impide que se paralelice **lo trivial**, no lo que cuesta órdenes de magnitud más que el umbral.
+  Esas sentencias seguirán yendo en paralelo, y con razón; lo que hay que arreglar es la sentencia.
 - **Un job informa hacia atrás; una alerta avisa en el momento.** Los contadores
   `SQLServer:Locks / Number of Deadlocks/sec / _Total` y
   `SQLServer:General Statistics / Processes blocked` sirven como condición de rendimiento en una
   alerta de Agent. Lo que **no** funciona es alertar sobre el mensaje de error 1205: la víctima
   de deadlock no se escribe en el log de errores por defecto, así que esa alerta no se dispara
   nunca.
+- **El caso inverso: aquí el ruido se lee como señal.** `sys.dm_os_wait_stats` devuelve mezcladas
+  las esperas reales y las de tareas de fondo que simplemente esperan trabajo. Medido en una
+  instancia: **las cinco esperas mayores sumaban el 80,2 % del total y ninguna era contención**
+  —`HADR_*`, `BROKER_TRANSMITTER`, `LOGMGR_QUEUE`—, tapando por completo el paralelismo que sí
+  importaba. Leído sin filtrar, el diagnóstico habría sido «esta instancia espera por Always On».
+  Filtra siempre con la lista de exclusión conocida antes de ordenar por porcentaje, y añade dos
+  columnas que la lectura ingenua olvida: el **signal wait** de cada espera —el porcentaje de
+  tiempo que la tarea ya estaba lista y solo esperaba CPU— y el número de tareas, que distingue
+  «muchas esperas cortas» de «una espera eterna».
+- **Los totales del plan cache no cubren el uptime.** `sys.dm_exec_query_stats` acumula desde
+  `creation_time` de **cada plan**, no desde el arranque del servidor. En una misma foto convivían
+  una fila con 3 días de historia y otra con unos minutos. Sirve para ordenar por magnitud; sumar
+  sus totales y presentarlos como «el consumo del periodo» es un error. Incluye `creation_time`
+  en toda consulta al plan cache que vaya a un informe.
+
+**Sub-caso medido — el instrumento no sólo tapa la evidencia: a veces *es* el consumo.** Hasta
+aquí esta regla trataba la instrumentación como fuente que se degrada. También hay que auditar
+lo que **cuesta**. Medido: el mayor consumidor de CPU de toda una instancia no era ninguna
+consulta de negocio, sino **una métrica de un colector de monitorización** que interrogaba el
+historial de respaldos **cada 10 segundos**:
+
+| | Medido en 66 h |
+|---|---:|
+| Ejecuciones | 23.759 |
+| CPU | **80.377,8 s** (22,3 h) |
+| Lecturas lógicas | **19.997.423.526** |
+| Lecturas por ejecución | 841.820 |
+| Duración media | 3.522,5 ms |
+
+La tabla consultada ocupaba **67 MB (8.576 páginas)**: leer 841.820 páginas significa recorrerla
+unas **98 veces por ejecución**. La causa era doble y ninguna mitad se arregla sola — la consulta
+agrupaba el historial y lo volvía a cruzar consigo mismo sin índice que soportara el predicado, y
+el historial llevaba **2.236 días** acumulándose porque nadie lo purgaba nunca.
+
+> Al ordenar el plan cache por CPU, **no descartes las filas sin base de datos atribuida**. Las
+> tareas del motor y los colectores externos aparecen con `dbid` nulo y por eso se caen de
+> cualquier informe organizado por base — que es justo donde se esconden los mayores consumidores
+> (ver también el sub-caso de Change Tracking en R-25).
+>
+> Y aplica a la instrumentación el mismo criterio que a cualquier proceso: **la frecuencia se
+> justifica con la velocidad a la que cambia el dato**. Un indicador sobre el último respaldo no
+> cambia cada 10 segundos; bajarlo a 5 minutos divide su coste por 30 sin perder información.
+
+**Sub-caso medido — las esperas acumuladas no pueden fechar una regresión.** `sys.dm_os_wait_stats`
+suma desde el arranque del servicio. Con **63 días** de uptime, buscar en ella una degradación de
+dos días es inútil: la señal queda diluida por un factor de 30. Lo que sí funciona, y no cuesta
+nada:
+
+- **Dos capturas separadas.** Consultar `sys.dm_os_wait_stats` dos veces y restar. En una ventana
+  de 31,06 s medida así, `CXPACKET`+`CXCONSUMER` daban el **84 %** de la espera total y los
+  bloqueos **0 ms** — un reparto irreconocible frente al acumulado de 63 días. Igual con
+  `sys.dm_io_virtual_file_stats`, que también es acumulada.
+- **Query Store agregado por día.** Es lo único que fecha una regresión con precisión. Comparar
+  **laborables contra laborables** —el fin de semana distorsiona la media por sentencia, porque el
+  poco volumen que queda es batch pesado— dio en el caso medido **1,10 ms → 1,89 ms** por
+  sentencia (×1,72) y señaló el día exacto. Y contrastar una segunda base descartó de un plumazo
+  la causa de instancia: la vecina no se había movido.
+
+---
+
+## R-33 · Reducir volumen no es optimizar: mide quién lee la tabla antes de prometer rendimiento [obs]
+
+Un plan de poda se justifica solo. Lo que **no** se justifica solo es la frase que suele
+acompañarlo: «y además la aplicación irá más rápida».
+
+Caso medido: base de **305,72 GB usados**, plan de poda de **119,59 GB** entre reconstrucción de
+heaps, vaciado de bitácoras y corte por antigüedad. Antes de comprometer la ventana se miró
+`sys.dm_db_index_usage_stats`, con 57 días acumulados:
+
+| Tabla candidata | GB | Búsquedas | Escaneos | Escrituras |
+|---|---:|---:|---:|---:|
+| la mayor de la base | 48,00 | **0** | **0** | 2.506 |
+| la segunda | 24,82 | **0** | 2 *(del propio análisis)* | 5.044 |
+| la tercera | 12,87 | **0** | 2 *(del propio análisis)* | 3.365 |
+| una bitácora de proceso | 3,78 | **0** | 1 *(del propio análisis)* | **263.185** |
+| la que la aplicación **sí** usa | 22,18 | **19.642.060** | **0** | 3.365 |
+
+**Las tablas donde estaba todo el espacio recuperable no las leía nadie.** Se escribía en ellas y
+nunca se consultaban. Y la tabla que la aplicación sí castigaba —19,6 millones de búsquedas— se
+accede siempre **por búsqueda**, no por escaneo.
+
+> El coste de una búsqueda en un índice es **logarítmico** respecto al número de filas; el de un
+> escaneo es **lineal**. Quitar el 44,6 % de las filas de una tabla no cambia la profundidad de su
+> árbol: esas 19,6 millones de búsquedas cuestan exactamente lo mismo después de podar. **Toda la
+> ganancia de rendimiento de una reducción de datos se concentra en lo que hace escaneos.** Si
+> nada escanea la tabla, la ganancia es cero.
+
+```sql
+SELECT  t.name, i.index_id, i.type_desc,
+        ISNULL(us.user_seeks,0)   AS Busquedas,
+        ISNULL(us.user_scans,0)   AS Escaneos,
+        ISNULL(us.user_updates,0) AS Escrituras,
+        us.last_user_scan, us.last_user_seek
+FROM    sys.tables t
+        JOIN sys.indexes i ON i.object_id = t.object_id AND i.index_id IN (0,1)
+        LEFT JOIN sys.dm_db_index_usage_stats us
+               ON us.object_id = i.object_id AND us.index_id = i.index_id
+              AND us.database_id = DB_ID()
+WHERE   t.name IN (…las candidatas a poda…);
+```
+
+**Trampa de método, y no es menor: tus propias consultas de análisis contaminan estas
+estadísticas.** En el caso medido, los únicos escaneos registrados sobre cuatro de las cinco
+tablas llevaban marca de tiempo dentro de la ventana en que se ejecutaron los `COUNT(*)` del
+propio análisis. Sin mirar `last_user_scan` se habría concluido que la aplicación sí las lee.
+Compara siempre la hora contra la de tu sesión antes de interpretar el número.
+
+**Lo que una reducción de datos sí compra**, y suele bastar para justificarla: tiempo de backup y
+restore, `DBCC CHECKDB`, duración del ciclo de refresco de los entornos no productivos, y coste
+de disco. Todo ello es operación, no experiencia de usuario. Preséntalo como lo que es.
+
+Y antes de dar por bueno el diagnóstico, comprueba **dónde está de verdad el consumo**: en el
+mismo entorno, el mayor consumidor de CPU del servidor era la limpieza de Change Tracking
+(R-25) y el segundo una función escalar en un `SELECT` (R-14). Ninguno de los dos mejora un
+gramo al reducir volumen de datos.
+
+**La comprobación de dos minutos que decide la conversación entera.** Antes que el uso de
+índices, antes que cualquier conteo: mira cuánto pesa la espera por lectura de página.
+
+| Espera medida en el entorno del caso | % del total |
+|---|---:|
+| `CXPACKET` + `CXCONSUMER` | **12,14 %** |
+| `LATCH_EX` | 4,39 % |
+| `SOS_SCHEDULER_YIELD` | 1,15 % *(99,85 % de ella es señal)* |
+| **`PAGEIOLATCH_SH`** | **0,12 %** |
+
+> Reducir el tamaño de una base reduce E/S. Si la instancia **no espera por E/S**, la reducción no
+> se nota. `PAGEIOLATCH_*` cien veces por debajo del paralelismo es la prueba, y llega por un
+> camino independiente del uso de índices: dos evidencias distintas apuntando a lo mismo.
+
+El recíproco también vale, y es la única forma de rescatar el argumento: si `PAGEIOLATCH_*` sí
+pesa, la reducción de volumen vuelve a la mesa. Mídelo antes de decidir, no después.
+
+Un `SOS_SCHEDULER_YIELD` casi enteramente de **señal** —la tarea ya estaba lista y esperaba
+turno de CPU— apunta a presión de CPU, que se ataca por consultas y no por hardware.
+
+---
+
+## R-34 · Una consulta lenta con CPU casi nula no es lenta: está esperando [obs]
+
+Es la regla que evita el diagnóstico equivocado más caro: buscar la consulta que "consume
+mucho" cuando el problema es que **no consume nada**.
+
+Observado: seis sentencias de los procedimientos de búsqueda y alta de una aplicación web,
+medidas en Query Store sobre una ventana de tres días.
+
+| Sentencia | Ejec. | Duración media | CPU media | Lecturas lógicas | Duración máx. |
+|---|---:|---:|---:|---:|---:|
+| Alta (un `INSERT` de **una fila**) | 35 | **23.707,7 ms** | 0,6 ms | 11 | 69.256,3 ms |
+| Búsqueda | 124 | **22.141,2 ms** | 0,4 ms | 6 | 103.383,6 ms |
+| Búsqueda | 60 | 14.948,7 ms | 0,2 ms | 7 | 97.501,4 ms |
+| Búsqueda | 60 | 14.183,8 ms | 0,3 ms | 9 | 97.225,7 ms |
+| Validación previa | 179 | 9.293,9 ms | 0,3 ms | 6 | 114.401,7 ms |
+| Vista previa | 168 | 1.806,8 ms | 0,2 ms | 8 | 19.959,9 ms |
+
+**La relación duración/CPU llega a 55.000×.** El razonamiento es aritmético y no admite
+matices: una sentencia que toca 6 páginas y gasta 0,4 ms de procesador **no puede** tardar
+22 segundos por mérito propio. Todo ese tiempo es espera. Y el tamaño no interviene: el
+`INSERT` de una fila que tardaba 23,7 s escribía en una tabla de **4 MB y 95.422 filas**.
+
+En ese entorno **RCSI estaba apagado en las 8 bases revisadas**, así que la espera compatible
+con este perfil es el bloqueo: un lector necesita bloqueo compartido y se detiene detrás de
+cualquier escritura larga sobre la misma tabla. Todas las tablas comprobadas —13 de 13— tenían
+`lock_escalation = TABLE`, de modo que una escritura que supera ~5.000 bloqueos individuales
+detiene a **todos** los lectores, no sólo a los de las filas afectadas.
+
+**La CPU baja del servidor no es prueba de salud — es el síntoma.** En la misma ventana: media
+del **13 %**, máximo 53 %, y **cero minutos** por encima del 80 % en 256 muestras. Un servidor
+ocioso con usuarios quejándose es exactamente lo que produce una cadena de bloqueo: nadie
+trabaja porque casi todos esperan.
+
+```sql
+-- DETECCIÓN, después del hecho y sin haber capturado el bloqueo.
+-- Ejecutar en la base sospechosa. Devuelve sentencias que esperan en vez de trabajar.
+SELECT TOP (20)
+       p.query_id, OBJECT_NAME(q.object_id) AS Objeto,
+       SUM(rs.count_executions) AS Ejecuciones,
+       CAST(SUM(rs.avg_duration    * rs.count_executions)
+            / SUM(rs.count_executions) / 1000.0 AS decimal(18,1)) AS DuracionMediaMs,
+       CAST(SUM(rs.avg_cpu_time    * rs.count_executions)
+            / SUM(rs.count_executions) / 1000.0 AS decimal(18,1)) AS CpuMediaMs,
+       CAST(SUM(rs.avg_logical_io_reads * rs.count_executions)
+            / SUM(rs.count_executions) AS bigint)                 AS LecturasMedia,
+       CAST(SUM(rs.avg_duration * rs.count_executions)
+            / NULLIF(SUM(rs.avg_cpu_time * rs.count_executions),0) AS decimal(18,0)) AS Ratio
+FROM   sys.query_store_plan AS p
+JOIN   sys.query_store_query AS q  ON q.query_id = p.query_id
+JOIN   sys.query_store_runtime_stats AS rs ON rs.plan_id = p.plan_id
+JOIN   sys.query_store_runtime_stats_interval AS rsi
+       ON rsi.runtime_stats_interval_id = rs.runtime_stats_interval_id
+WHERE  rsi.start_time >= DATEADD(day, -3, GETDATE())
+GROUP  BY p.query_id, q.object_id
+HAVING SUM(rs.count_executions) >= 20
+   AND SUM(rs.avg_duration * rs.count_executions)
+       > 100 * SUM(rs.avg_cpu_time * rs.count_executions)
+ORDER  BY DuracionMediaMs DESC;
+```
+
+**Por qué Query Store y no las DMV de sesión.** `sys.dm_exec_requests` y cualquier consulta de
+cadenas de bloqueo sólo ven **el instante** en que se ejecutan. Un bloqueo intermitente que dura
+20 s y ocurre unas decenas de veces al día es invisible para ellas: en el caso medido, un
+muestreo de 31 s registró **0 ms** de espera por bloqueo y `get_blocking_chains` salió limpio,
+con el problema plenamente activo. Query Store conserva duración **y** CPU por sentencia, así que
+la firma sobrevive al hecho — es la única forma de diagnosticar esto a posteriori.
+
+> Antes de concluir «bloqueo», descarta las otras tres causas de duración ≫ CPU. Son pocas y se
+> distinguen rápido:
+>
+> | Causa alternativa | Cómo se descarta |
+> |---|---|
+> | Cliente que no consume el resultado (`ASYNC_NETWORK_IO`) | Mira `avg_rowcount`: aquí devolvía **0 o 1 fila**. Este efecto necesita result sets grandes |
+> | Consulta remota o por *linked server* | Las lecturas remotas **no** cuentan como lecturas lógicas. Comprueba si la sentencia referencia un servidor vinculado; las del caso eran todas locales |
+> | Espera por concesión de memoria | `RESOURCE_SEMAPHORE` y `Memory Grants Pending`: ambos estaban en **0** |
+
+Y la consecuencia operativa: si `blocked process threshold` está en `0` —el valor de fábrica—
+nada de esto queda registrado en ninguna parte (R-25). Encenderlo **no arregla nada**, pero es lo
+único que convierte esta inferencia en el `session_id` y la sentencia del bloqueador real.
+Relacionada con R-04 (transacción corta), R-09 (`NOLOCK` como síntoma de RCSI apagado), R-26
+(*head blocker* dormido) y R-29 (escalado a bloqueo de tabla).
+
+---
+
+## R-35 · Una migración de versión mueve los datos, no la puesta a punto [obs]
+
+Un `RESTORE` en una instancia nueva reproduce las páginas, no el trabajo de años que se hizo
+sobre ellas. Lo que **viaja** dentro del backup y lo que **se queda** son dos listas distintas, y
+ninguna de las dos es la que se supone:
+
+| Viaja con el backup | Se queda en el servidor viejo | Se resetea a valores de fábrica |
+|---|---|---|
+| Estadísticas **y su `modification_counter`** | Jobs de respaldo y mantenimiento | `sp_configure` de la instancia |
+| `compatibility_level` **del motor anterior** | Sesiones de Extended Events | `blocked process threshold` |
+| Query Store, con su historial completo | Alertas y operadores | Trazas y colectores |
+| Banderas de base (`AUTO_SHRINK`, RCSI, `AUTO_UPDATE_STATISTICS_ASYNC`) | Plan cache | |
+
+La trampa está en la primera columna: **lo que viaja parece que está bien porque está**. Las
+estadísticas llegan intactas —incluido su contador de modificaciones— y por eso nadie las
+actualiza. El compat level llega intacto, y por eso la instancia nueva ejecuta con el optimizador
+de la vieja.
+
+Medido en una migración de dos versiones mayores, 49 bases restauradas en un fin de semana, con
+la instancia nueva medida a las 63 h:
+
+| | Medido |
+|---|---:|
+| Bases de usuario con el compat del motor **anterior** | **43 de 45** |
+| Estadísticas con más de 30 días (base principal, tablas >10.000 filas) | **2.190 de 2.331** |
+| Con más de 180 días | 639 |
+| Con muestreo inferior al 5 % | 197 |
+| **Con más modificaciones pendientes que filas tiene la tabla** | **39** |
+| Antigüedad máxima | **241 días** |
+| Esperas `WAIT_ON_SYNC_STATISTICS_REFRESH` acumuladas en 63 h | 10.985 · **195.966 ms** |
+| Bases en `FULL` con `log_reuse_wait_desc = 'LOG_BACKUP'` | **6** |
+
+Casos concretos: una tabla de **14.392.961 filas con 28.924.023 modificaciones pendientes** y 59
+días sin actualizar; otra de **8.439.849 filas** con la misma cifra de modificaciones —renovación
+completa— muestreada al **1,6 %** hace **241 días**.
+
+### La firma que lo delata: menos lecturas y más tiempo
+
+Es lo que hace esta regla útil, porque contradice la intuición. Comparando **las mismas consultas**
+—mismo `query_id`— antes y después, con peso fijo:
+
+| Base | Consultas | Duración | CPU | Lecturas lógicas |
+|---|---:|---|---|---|
+| Principal | 301 | 0,553 → **0,975 ms** (×1,76) | 0,616 → 0,903 ms | 45,1 → **33,5 (−26 %)** |
+| Secundaria | 140 | 0,041 → **0,053 ms** (×1,29) | 0,036 → 0,048 ms | 4,7 → **3,4 (−28 %)** |
+
+Menos páginas leídas y más tiempo no describe hardware peor: describe **hardware mejor ejecutando
+planes peores**. Si el almacenamiento fuera el problema subirían las lecturas o la espera de
+disco; aquí `PAGEIOLATCH_SH` promediaba **0,48 ms** sobre 1.055.821 esperas.
+
+> **El control que separa «plan peor» de «CPU más lenta».** Aísla las consultas cuyo I/O **no
+> cambió** (±5 %): si las páginas son las mismas, el plan es equivalente y lo único que queda es
+> el coste por unidad de trabajo. En el caso medido, con el plan controlado el CPU subía solo un
+> **17–33 %** de media y la mayoría de consultas no cambiaba —16 de 37 y 9 de 20—, así que el
+> ×1,76 **no** se explica por el servidor: viene de las consultas cuyo plan sí cambió. Sin este
+> control, el informe habría culpado al hardware nuevo.
+
+### El compat level no es neutral, y aquí se mide
+
+Dejarlo en el nivel antiguo evita regresiones de plan —para eso existe— pero desactiva, por
+diseño, todo lo que se acaba de pagar. Con compat < 150 no hay *inlining* de funciones escalares
+(R-14) ni compilación diferida de table variables (R-19); con compat < 160 no hay optimización de
+planes sensibles a parámetros (R-06), ni *CE feedback*, ni *DOP feedback*.
+
+Eso deja de ser teórico en cuanto se cuenta el código: **176 funciones escalares y 46 TVF
+multi-sentencia frente a 9 TVF inline** en una sola base — y **cuatro de los objetos más
+degradados de la migración eran funciones escalares**, una de ellas con **1.130.562 ejecuciones
+diarias**. Es exactamente el patrón que el compat nuevo resuelve sin tocar una línea de T-SQL.
+
+```sql
+-- DETECCIÓN 1 · el estado que el restore trajo intacto y nadie revisó
+SELECT DB_NAME() AS Base, COUNT(*) AS Total,
+       SUM(CASE WHEN sp.modification_counter > sp.rows THEN 1 ELSE 0 END)  AS ModsSuperanFilas,
+       SUM(CASE WHEN DATEDIFF(day, sp.last_updated, GETDATE()) > 30  THEN 1 ELSE 0 END) AS MasDe30Dias,
+       SUM(CASE WHEN 100.0 * sp.rows_sampled / NULLIF(sp.rows,0) < 5 THEN 1 ELSE 0 END) AS MuestreoBajo5Pct,
+       MAX(DATEDIFF(day, sp.last_updated, GETDATE()))                      AS DiasMaximo
+FROM   sys.stats s
+CROSS APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) sp
+WHERE  sp.rows > 10000 AND OBJECTPROPERTY(s.object_id, 'IsUserTable') = 1;
+
+-- DETECCIÓN 2 · lo que se quedó por el camino, en una sola foto
+SELECT compatibility_level, is_auto_shrink_on, is_query_store_on,
+       is_auto_update_stats_async_on, is_read_committed_snapshot_on,
+       recovery_model_desc, log_reuse_wait_desc, name
+FROM   sys.databases WHERE database_id > 4 ORDER BY compatibility_level, name;
+```
+
+**El orden de la remediación no es negociable.** Estadísticas primero, compat level al final.
+Subir el compat con histogramas de 241 días es evaluar un optimizador nuevo con datos falsos: el
+resultado no es interpretable, ni bueno ni malo. Y entre medias, el CU — una instancia recién
+migrada suele estar en **RTM**, que es la peor versión posible sobre la que adoptar funciones
+nuevas.
+
+**Lo que sí es un regalo: Query Store viaja dentro del backup.** Es la única razón por la que una
+migración se puede medir en lugar de opinar. Si la base lo tenía activo en el servidor viejo, el
+historial llega con ella y permite comparar el mismo `query_id` antes y después del cambio de
+motor. Corolario operativo: **activar Query Store es un requisito previo de la migración**, no una
+mejora posterior — en las bases que no lo tenían, no existe línea base y ya no se puede fabricar.
+
+> Y el que puede detener una base mientras se discute lo demás: comprobar
+> `log_reuse_wait_desc = 'LOG_BACKUP'` el primer día. Si los jobs de respaldo de log no se
+> recrearon, el log de cada base en `FULL` crece sin truncarse hasta llenar la unidad. Se
+> comprueba en cinco minutos y fue el hallazgo de consecuencia más brusca del caso medido.
+
+Relacionada con R-25 (configuración por defecto), R-28 (medir antes de concluir), R-06, R-14 y
+R-19 (lo que el compat level habilita).
 
 ---
 
@@ -1113,3 +1717,5 @@ Dos corolarios que aplican a cualquier captura, no sólo a XE:
 | **[gen]** `COUNT(*) > 0` para probar existencia | `EXISTS`: corta en la primera coincidencia |
 | **[gen]** Cursor | Reescribir set-based. Si es inevitable: `LOCAL FAST_FORWARD` |
 | **[gen]** `LIKE` sin comodines | Usar `=` |
+| **[obs]** `=` **con** comodín: `col = 'PREFIJO%'` | El caso inverso al anterior, y el peligroso: compara por igualdad exacta contra una cadena que contiene `%`, así que solo coincide si el dato es literalmente `PREFIJO%`. **No da error, devuelve cero filas.** Medido: 0 coincidencias donde `LIKE` daba **39.988**, en una condición repetida 3 veces dentro del mismo objeto. Detección barata: `SELECT ... WHERE col LIKE 'x%'` contra `WHERE col = 'x%'` y comparar conteos. Mejor arreglo que `LIKE`: filtrar por el `int` del catálogo, que no depende de cómo se escriba el nombre |
+| **[obs]** `DELETE`/`UPDATE` con `LEFT JOIN` y `WHERE col NOT IN (...)` | Doble fallo: cuando el `LEFT JOIN` no casa, `NULL NOT IN (...)` es `UNKNOWN` y la fila **no** se borra —el `LEFT JOIN` actúa como `INNER JOIN`—; y si la subconsulta devuelve un solo `NULL`, **no se borra nada en absoluto**, en silencio. Usar `NOT EXISTS` y decidir explícitamente qué pasa con las filas sin pareja |
