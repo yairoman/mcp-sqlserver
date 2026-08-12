@@ -196,19 +196,19 @@ Finalmente, clic en **Guardar**.
 
 ### 📈 Performance & Monitoring (11)
 
-| Tool                    | Descripción                                       |
-| ----------------------- | ------------------------------------------------- |
-| `get_index_usage_stats` | Estadísticas de uso de índices                    |
-| `get_missing_indexes`   | Índices recomendados por el optimizer             |
-| `get_active_sessions`   | Sesiones activas y queries en ejecución           |
-| `get_blocking_chains`   | Cadenas de bloqueo **activas en este instante**   |
-| `get_blocking_history`  | Bloqueos **pasados** (Query Store): quién esperó, cuánto y si se abortó |
-| `get_wait_stats`        | Esperas del servidor — acumuladas, o **medidas en una ventana** con `sampleSeconds` |
-| `get_performance_triage` | Mide, clasifica y **dictamina**: ¿el servidor espera o trabaja, y en qué? |
-| `get_table_statistics`  | Estadísticas de columnas y frescura               |
-| `get_query_stats`       | Top queries por CPU/duración/lecturas             |
-| `get_configuration_health` | Audita la configuración del motor y **emite un juicio**: qué está mal, qué debería ser y por qué |
-| `get_compatibility_assessment` | Assessment de subida de compat level: prerequisitos, qué mejora solo, qué revisar y plan de aplicación |
+| Tool                           | Descripción                                   |
+| ------------------------------ | --------------------------------------------- |
+| `get_index_usage_stats`        | Estadísticas de uso de índices                |
+| `get_missing_indexes`          | Índices recomendados por el optimizer         |
+| `get_active_sessions`          | Sesiones activas y queries en ejecución       |
+| `get_blocking_chains`          | Cadenas de bloqueo activas en este instante   |
+| `get_blocking_history`         | Bloqueos pasados: quién esperó y si se abortó |
+| `get_wait_stats`               | Esperas: acumuladas o medidas en una ventana  |
+| `get_performance_triage`       | ¿El servidor espera o trabaja? Con veredicto  |
+| `get_table_statistics`         | Estadísticas de columnas y frescura           |
+| `get_query_stats`              | Top queries por CPU/duración/lecturas         |
+| `get_configuration_health`     | Auditoría de configuración, con juicio        |
+| `get_compatibility_assessment` | Assessment de subida de compat level          |
 
 > **`get_configuration_health` es la única tool que opina.** Las demás devuelven datos; esta los
 > contrasta contra valores conocidos y clasifica cada hallazgo por severidad y por categoría —
