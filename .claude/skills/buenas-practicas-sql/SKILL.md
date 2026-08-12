@@ -5,7 +5,7 @@ description: Base de conocimiento viva de buenas prácticas y anti-patrones de T
 
 # Buenas prácticas T-SQL — base de conocimiento
 
-**33 reglas en 4 niveles.** Ninguna es genérica de manual: cada una salió de un problema real
+**35 reglas en 4 niveles.** Ninguna es genérica de manual: cada una salió de un problema real
 medido en código productivo —o, en las marcadas `[gen]`, de un mecanismo conocido del motor
 que este entorno tiene todas las condiciones para sufrir— con su costo y su consulta de
 detección.
@@ -96,6 +96,8 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-25** | La configuración por defecto de la instancia no es la correcta |
 | **R-28** | La instrumentación de diagnóstico también se audita — *el vacío se lee como ausencia* |
 | **R-33** | Reducir volumen no es optimizar — *mide quién lee la tabla antes de prometer rendimiento* |
+| **R-34** | Una consulta lenta con CPU casi nula no es lenta: está esperando — *y la CPU baja del servidor es el síntoma, no la salud* |
+| **R-35** | Una migración de versión mueve los datos, no la puesta a punto — *menos lecturas y más tiempo es la firma* |
 
 ---
 
@@ -144,9 +146,13 @@ copiando SQL a mano. Varias tienen tool dedicada:
 | El mismo estado filtrado en unas condiciones del objeto y no en otras | `get_object_definition` y leerlo entero — el diff no basta | R-30 |
 | Coste real por sentencia, y si la ausencia de una prueba algo | `get_query_stats`; `execute_select_query` sobre Query Store, comprobando antes `query_capture_mode_desc` | R-28, R-31 |
 | Si alguien lee de verdad las tablas que vas a podar — y si el escaneo que ves es tuyo | `execute_select_query` sobre `sys.dm_db_index_usage_stats`, mirando `last_user_scan` contra la hora de tu sesión | R-33 |
+| Estadísticas que el restore trajo intactas, y el compat level que se quedó en el motor viejo | `execute_select_query` sobre `sys.dm_db_stats_properties` (`modification_counter` contra `rows`) y `sys.databases` | R-35 |
+| Consultas del Object Explorer contaminando un ranking de Query Store | `execute_select_query` filtrando `query_sql_text NOT LIKE '%msparam%'` y separando por `object_id` | R-28 |
 | Retención de Change Tracking, por instancia y no por base | `execute_select_query` sobre `sys.change_tracking_databases` | R-25 |
 | Señal de contención en tempdb | `get_wait_stats` (`PAGELATCH_EX`, `LATCH_EX`) | R-05 |
 | Varianza de duración (max ≫ avg) | `get_query_stats` | R-06 |
+| Sentencias que esperan en vez de trabajar (duración ≫ CPU con pocas lecturas) | `execute_select_query` sobre Query Store: `avg_duration` contra `avg_cpu_time` y `avg_logical_io_reads` | R-34 |
+| Si la instancia está fechando algo o solo acumulando | `get_wait_stats` **dos veces** y restar; Query Store agregado por día laborable | R-28 |
 | FKs no confiables (en observación) | `check_referential_integrity` | registro |
 | Plan estimado (scan vs seek) | `explain_query` | R-01 |
 | Todo lo demás | `execute_select_query` | — |
