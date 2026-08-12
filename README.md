@@ -161,7 +161,7 @@ Finalmente, clic en **Guardar**.
 
 ---
 
-## 🛠️ Tools Disponibles (29)
+## 🛠️ Tools Disponibles (30)
 
 ### 📋 Schema & Metadata (9)
 
@@ -194,17 +194,26 @@ Finalmente, clic en **Guardar**.
 | `explain_query`  | Plan de ejecución estimado                           |
 | `validate_query` | Validación de sintaxis sin ejecutar                  |
 
-### 📈 Performance & Monitoring (7)
+### 📈 Performance & Monitoring (8)
 
-| Tool                    | Descripción                             |
-| ----------------------- | --------------------------------------- |
-| `get_index_usage_stats` | Estadísticas de uso de índices          |
-| `get_missing_indexes`   | Índices recomendados por el optimizer   |
-| `get_active_sessions`   | Sesiones activas y queries en ejecución |
-| `get_blocking_chains`   | Cadenas de bloqueo activas              |
-| `get_wait_stats`        | Estadísticas de espera del servidor     |
-| `get_table_statistics`  | Estadísticas de columnas y frescura     |
-| `get_query_stats`       | Top queries por CPU/duración/lecturas   |
+| Tool                    | Descripción                                       |
+| ----------------------- | ------------------------------------------------- |
+| `get_index_usage_stats` | Estadísticas de uso de índices                    |
+| `get_missing_indexes`   | Índices recomendados por el optimizer             |
+| `get_active_sessions`   | Sesiones activas y queries en ejecución           |
+| `get_blocking_chains`   | Cadenas de bloqueo **activas en este instante**   |
+| `get_blocking_history`  | Bloqueos **pasados** (Query Store): quién esperó, cuánto y si se abortó |
+| `get_wait_stats`        | Estadísticas de espera del servidor               |
+| `get_table_statistics`  | Estadísticas de columnas y frescura               |
+| `get_query_stats`       | Top queries por CPU/duración/lecturas             |
+
+> **Bloqueos: cuál usar.** `get_blocking_chains` lee `sys.dm_exec_requests`, así que solo ve lo
+> que está bloqueado **ahora**; si el bloqueo terminó, no deja rastro. Para «¿tuvo bloqueos el
+> servidor hoy?» usa `get_blocking_history`, que reconstruye el pasado desde Query Store.
+> Sin argumentos barre todas las bases y devuelve un resumen; con `database` lista las consultas
+> que esperaron. Query Store registra **quién esperó, no quién bloqueó**: para la cadena
+> bloqueador→bloqueado hace falta el *blocked process report* (`blocked process threshold` > 0
+> más una sesión de Extended Events), y la tool avisa si está apagado.
 
 ### 🔍 Integrity & Analysis (6)
 
