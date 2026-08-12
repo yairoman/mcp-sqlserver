@@ -161,7 +161,7 @@ Finalmente, clic en **Guardar**.
 
 ---
 
-## 🛠️ Tools Disponibles (32)
+## 🛠️ Tools Disponibles (33)
 
 ### 📋 Schema & Metadata (9)
 
@@ -194,7 +194,7 @@ Finalmente, clic en **Guardar**.
 | `explain_query`  | Plan de ejecución estimado                           |
 | `validate_query` | Validación de sintaxis sin ejecutar                  |
 
-### 📈 Performance & Monitoring (10)
+### 📈 Performance & Monitoring (11)
 
 | Tool                    | Descripción                                       |
 | ----------------------- | ------------------------------------------------- |
@@ -208,6 +208,7 @@ Finalmente, clic en **Guardar**.
 | `get_table_statistics`  | Estadísticas de columnas y frescura               |
 | `get_query_stats`       | Top queries por CPU/duración/lecturas             |
 | `get_configuration_health` | Audita la configuración del motor y **emite un juicio**: qué está mal, qué debería ser y por qué |
+| `get_compatibility_assessment` | Assessment de subida de compat level: prerequisitos, qué mejora solo, qué revisar y plan de aplicación |
 
 > **`get_configuration_health` es la única tool que opina.** Las demás devuelven datos; esta los
 > contrasta contra valores conocidos y clasifica cada hallazgo por severidad y por categoría —
@@ -218,6 +219,16 @@ Finalmente, clic en **Guardar**.
 > Audita **cómo está configurado** el motor, no cómo está escrito el código: una función escalar
 > que quema horas de CPU no aparece aquí. El criterio sale de R-25 del skill
 > `buenas-practicas-sql`, derivado de auditorías reales.
+
+> **`get_compatibility_assessment` responde «¿qué pasa si subo el compat level?»** Sin
+> `targetLevel` asume el máximo que soporta el motor; sin `database`, resume cuántas bases están
+> por detrás y cuántas podrían migrar sin red. Lo que lo hace fiable es que **no adivina**: lee
+> `sys.sql_modules.is_inlineable`, o sea la respuesta del propio optimizador sobre qué funciones
+> escalares dejarían de ejecutarse fila por fila. En una base medida: 115 de 176 inlineables, y
+> las 61 restantes seguirán igual a cualquier nivel — eso separa lo que se arregla solo de lo que
+> exige reescritura. Comprueba además Query Store como prerequisito (sin él la subida no es
+> reversible en la práctica), planes forzados, plan guides, configuraciones que entran en
+> conflicto y frescura de estadísticas.
 
 > **Rendimiento: empieza por el triage.** `get_wait_stats` sin argumentos devuelve el acumulado
 > **desde el arranque del servicio**, que sirve para ver tendencias pero **no** para diagnosticar
