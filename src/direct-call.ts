@@ -16,6 +16,7 @@ import { waitStatsHandler } from "./tools/performance/wait-stats.js";
 import { queryStatsHandler } from "./tools/performance/query-stats.js";
 import { blockingChainsHandler } from "./tools/performance/blocking-chains.js";
 import { blockingHistoryHandler } from "./tools/performance/blocking-history.js";
+import { configurationHealthHandler } from "./tools/performance/configuration-health.js";
 import { activeSessionsHandler } from "./tools/performance/active-sessions.js";
 import { closePool } from "./connection.js";
 
@@ -33,6 +34,7 @@ async function run() {
     query_stats: queryStatsHandler,
     blocking_chains: blockingChainsHandler,
     blocking_history: blockingHistoryHandler,
+    configuration_health: configurationHealthHandler,
     active_sessions: activeSessionsHandler,
   };
 

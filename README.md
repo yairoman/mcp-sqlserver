@@ -161,7 +161,7 @@ Finalmente, clic en **Guardar**.
 
 ---
 
-## 🛠️ Tools Disponibles (30)
+## 🛠️ Tools Disponibles (31)
 
 ### 📋 Schema & Metadata (9)
 
@@ -194,7 +194,7 @@ Finalmente, clic en **Guardar**.
 | `explain_query`  | Plan de ejecución estimado                           |
 | `validate_query` | Validación de sintaxis sin ejecutar                  |
 
-### 📈 Performance & Monitoring (8)
+### 📈 Performance & Monitoring (9)
 
 | Tool                    | Descripción                                       |
 | ----------------------- | ------------------------------------------------- |
@@ -206,6 +206,17 @@ Finalmente, clic en **Guardar**.
 | `get_wait_stats`        | Estadísticas de espera del servidor               |
 | `get_table_statistics`  | Estadísticas de columnas y frescura               |
 | `get_query_stats`       | Top queries por CPU/duración/lecturas             |
+| `get_configuration_health` | Audita la configuración del motor y **emite un juicio**: qué está mal, qué debería ser y por qué |
+
+> **`get_configuration_health` es la única tool que opina.** Las demás devuelven datos; esta los
+> contrasta contra valores conocidos y clasifica cada hallazgo por severidad y por categoría —
+> *Estabilidad*, *Diagnosticabilidad*, *Rendimiento*, *Integridad*—, que es lo que dice qué
+> arreglar primero. Comprueba memoria, MAXDOP, umbral de paralelismo, archivos de tempdb, compat
+> level **contra la versión real del motor**, RCSI, `auto_shrink`/`auto_close`/`page_verify`,
+> retención de Change Tracking, estado de Query Store y si los bloqueos son diagnosticables.
+> Audita **cómo está configurado** el motor, no cómo está escrito el código: una función escalar
+> que quema horas de CPU no aparece aquí. El criterio sale de R-25 del skill
+> `buenas-practicas-sql`, derivado de auditorías reales.
 
 > **Bloqueos: cuál usar.** `get_blocking_chains` lee `sys.dm_exec_requests`, así que solo ve lo
 > que está bloqueado **ahora**; si el bloqueo terminó, no deja rastro. Para «¿tuvo bloqueos el

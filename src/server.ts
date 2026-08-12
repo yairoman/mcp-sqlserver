@@ -36,6 +36,7 @@ import { missingIndexesDefinition, missingIndexesHandler } from "./tools/perform
 import { activeSessionsDefinition, activeSessionsHandler } from "./tools/performance/active-sessions.js";
 import { blockingChainsDefinition, blockingChainsHandler } from "./tools/performance/blocking-chains.js";
 import { blockingHistoryDefinition, blockingHistoryHandler } from "./tools/performance/blocking-history.js";
+import { configurationHealthDefinition, configurationHealthHandler } from "./tools/performance/configuration-health.js";
 import { waitStatsDefinition, waitStatsHandler } from "./tools/performance/wait-stats.js";
 import { tableStatisticsDefinition, tableStatisticsHandler } from "./tools/performance/table-statistics.js";
 import { queryStatsDefinition, queryStatsHandler } from "./tools/performance/query-stats.js";
@@ -99,6 +100,7 @@ export function createServer(config: AppConfig): Server {
     { definition: activeSessionsDefinition, handler: activeSessionsHandler },
     { definition: blockingChainsDefinition, handler: blockingChainsHandler },
     { definition: blockingHistoryDefinition, handler: blockingHistoryHandler },
+    { definition: configurationHealthDefinition, handler: configurationHealthHandler },
     { definition: waitStatsDefinition, handler: waitStatsHandler },
     { definition: tableStatisticsDefinition, handler: tableStatisticsHandler },
     { definition: queryStatsDefinition, handler: queryStatsHandler },
