@@ -744,6 +744,82 @@ constantes (IDs de catálogo) una sola vez.
 > distintas) y el join habría duplicado inserciones. Usa `OUTER APPLY ... TOP 1` cuando no
 > puedas garantizar unicidad.
 
+**Sub-caso medido — la UDF aparece dos veces en el plan cache, y la segunda es la que asusta.**
+Una consulta de una base de reporting llamaba a una función escalar declarada en **otra base**
+desde su lista de `SELECT`. En `sys.dm_exec_query_stats` conviven dos filas:
+
+| Fila | Ejecuciones | CPU total | Lecturas |
+|---|---:|---:|---:|
+| La consulta padre | **1** | 144.692 ms | 131.460.437 |
+| El cuerpo de la UDF | **67.736** | 104.777 ms | 128.092.455 |
+
+**Una sola ejecución de la consulta padre se abrió en 67.736 ejecuciones de la función, en unos
+tres minutos**, a 1.891 lecturas cada una. Las 128 M de lecturas de la segunda fila son
+prácticamente las mismas 131 M de la primera: no son costes que se sumen, es el mismo trabajo
+visto desde dentro.
+
+> Al ordenar el plan cache por CPU, una fila con un número de ejecuciones desproporcionado
+> respecto a las demás y un texto que parece un fragmento suelto —`SELECT TOP 1 @variable = …`—
+> casi siempre es el cuerpo de una UDF escalar. Buscar ese `@variable` en `sys.sql_modules`
+> identifica la función; `sys.objects.type_desc = 'SQL_SCALAR_FUNCTION'` lo confirma.
+
+Comprueba el compat level antes de estimar la ganancia: con 130 no hay inlining y la reescritura
+es la única salida.
+
+**Sub-caso medido — la cadena: una llamada, cuatro consultas.** La función escalar del caso
+anterior llamaba a su vez a **otras dos funciones escalares**:
+
+```
+FuncionPrincipal(@id)
+  +-- FuncionA(@id)      1 consulta  (2 tablas)
+  +-- FuncionB(@id)      2 consultas (2 tablas cada una)
+  +-- su propia consulta 1 consulta  (4 tablas)
+```
+
+Hasta **4 consultas por invocación**, y la invocación ocurre una vez por fila. Al medir el
+anidamiento con `sys.sql_expression_dependencies` apareció además que una de las funciones de
+apoyo tenía **54 referencias** en el esquema — cifra que asusta y frena la reescritura hasta que
+se mira de cerca: entre ellas había sufijos `_BkUp`, `_notused`, `_Test`, `_Preliminary`,
+`_prueba` y cinco con fecha en el nombre. **El alcance real de un cambio así casi siempre es
+mucho menor que el que devuelve el catálogo**; sepáralo con `sys.dm_exec_procedure_stats` y Query
+Store antes de dimensionar el trabajo.
+
+**El descarte que ahorra semanas: no son los índices.** Las cinco tablas que recorría la cadena
+sumaban **127 MB** y ninguna llegaba a 79.000 filas, con los índices exactos que los predicados
+necesitaban. El coste no estaba en lo que valía una llamada, sino en cuántas se hacían. Antes de
+proponer un índice, comprueba el tamaño de lo que se recorre: si es pequeño y está indexado, el
+problema es el número de invocaciones y ningún índice lo va a arreglar.
+
+**La receta de reescritura, verificada.** Resolver cada concepto como conjunto una sola vez y
+unir por la izquierda:
+
+```sql
+WITH ConjuntoA AS ( … ),          -- lo que resolvía FuncionA, para todas las claves
+     ConjuntoB AS ( … )           -- lo que resolvía FuncionB
+SELECT t.Clave,
+       Resultado = CASE WHEN a.Clave IS NOT NULL THEN 0
+                        WHEN EXISTS ( … predicado principal … ) THEN 1
+                        ELSE 0 END
+FROM   dbo.Tabla t
+       LEFT JOIN ConjuntoA a ON a.Clave = t.Clave
+       LEFT JOIN ConjuntoB b ON b.Clave = t.Clave;
+```
+
+Medido sobre datos reales, con `EXCEPT` en ambas direcciones y **0 diferencias** en 3.000 casos:
+
+| Versión | Filas resueltas | Duración | Por fila |
+|---|---:|---:|---:|
+| escalar | 3.000 | 26.950 ms | 8,98 ms |
+| de conjunto | 71.218 | **568 ms** | 0,008 ms |
+
+23,7 veces más filas en 47 veces menos tiempo.
+
+> ⚠️ **No es un reemplazo transparente.** Una función escalar se invoca `dbo.F(x) = 1`; una
+> inline, `OUTER APPLY dbo.F_v2(x)`. **No se intercambia con `sp_rename`**: hay que editar cada
+> llamador, y cada edición necesita su propio respaldo y su propia verificación. Convertir la
+> función quita la serialización del plan; la ganancia grande está en dejar de llamarla una vez
+> por fila. Son dos cambios distintos y conviene no confundirlos al estimar.
+
 ## R-15 · Funciones de tabla: inline, no multi-statement [obs]
 
 Observado: una función de tabla multi-statement (`RETURNS @tabla TABLE`) invocada con
@@ -889,6 +965,29 @@ mata el seek. Es el caso más común en aplicaciones .NET/EF, que envían `NVARC
 
 Detección: buscar `CONVERT_IMPLICIT` en el plan, o comparar los tipos de parámetro y columna.
 
+**Sub-caso medido — la misma clave lógica declarada con tres tipos, y sin una sola FK que lo
+sujete.** Un identificador de negocio estaba definido como `varchar(36)` en dos tablas y como
+`uniqueidentifier` en una tercera de 10,83 GB y 7,6 M de filas. Unirlas obliga a convertir en cada
+fila. Coste medido sobre el mismo corte de datos: **14,5 s** con conversión frente a **5,0 s**
+entre las dos tablas que sí comparten tipo.
+
+Lo que convierte esto en un hallazgo de modelo y no solo de rendimiento: **no existía ninguna
+clave foránea entre las tres**. La relación se sostenía por convención. Se verificó con una
+muestra de 20.000 filas que la conversión empareja el **99,8 %** — el 0,2 % restante eran
+huérfanos que ninguna restricción impedía.
+
+```sql
+SELECT COUNT(*) AS Muestra,
+       SUM(CASE WHEN p.Clave IS NOT NULL THEN 1 ELSE 0 END) AS ConPadre
+FROM   (SELECT TOP (20000) Clave FROM dbo.Hija) h
+       LEFT JOIN dbo.Padre p ON p.Clave = CAST(h.Clave AS varchar(36));
+```
+
+> Antes de unir dos tablas por un identificador "obvio", comprueba el tipo en **todas** las tablas
+> de la cadena, no solo en las dos que estás mirando. `validate_data_types` lo resuelve de una
+> pasada. Y si la unión no está respaldada por una FK, mide primero cuántas filas emparejan: la
+> convención puede llevar años rota sin que nadie lo note.
+
 ## R-27 · Orden de acceso consistente entre procedimientos [gen]
 
 Dos procesos que escriben las mismas tablas **en orden inverso** son un deadlock esperando su
@@ -984,6 +1083,51 @@ Detección: `sys.dm_db_partition_stats` sin fila con `index_id = 1`. Antes de co
 `forwarded_record_count` con `sys.dm_db_index_physical_stats(..., 'DETAILED')` fuera de horario
 pico.
 
+**Sub-caso medido — el heap que ocupa 50× lo que contiene, y la división que lo delata.** En una
+base de 305 GB, la segunda tabla más grande ocupaba **24,82 GB con 326.677 filas**: 3.252.900
+páginas al **1,88 % de ocupación**. No tenía columnas LOB. La comprobación que lo destapa es una
+división, no una DMV:
+
+```sql
+SELECT Filas, Paginas, BytesPorFila = Paginas * 8192.0 / Filas
+```
+
+**81.528 bytes por fila, diez veces el máximo de 8.060 que cabe en una fila de SQL Server.** Es
+aritméticamente imposible que sean datos: solo pueden ser páginas que el heap nunca devolvió tras
+borrados anteriores. Confirmación con `avg_page_space_used_in_percent` en modo `SAMPLED` — el modo
+`LIMITED` devuelve `NULL` en esa columna y no sirve.
+
+El coste no es solo disco: contar esas 326.677 filas tardó **27 segundos**, porque el motor
+recorre las 3.252.900 páginas. Un `REBUILD` las deja en ~61.000. Tres heaps del mismo entorno
+sumaban **38,38 GB de aire** y 5.407.300 *forwarded records*; el conjunto eran 432 heaps con
+125,66 GB.
+
+> **La consecuencia que rompe planes de trabajo:** una poda por antigüedad sobre un heap **no
+> libera ni un byte** sin `ALTER TABLE ... REBUILD` después. Las filas desaparecen y el archivo
+> mide lo mismo. Si un plan de reducción de datos no incluye ese paso, su estimación de ahorro es
+> ficción.
+
+Y antes de planificar el corte, **verifica que la columna de fecha está poblada**: en la misma
+base, una bitácora de **87.368.562 filas** tenía su única columna de fecha en `NULL` en el
+**100 %** de ellas. Cortar por ella no habría borrado nada. Una sola consulta lo descarta:
+
+```sql
+SELECT COUNT(*) AS Total,
+       SUM(CASE WHEN Fecha IS NULL THEN 1 ELSE 0 END) AS Nulas,
+       MIN(Fecha) AS Minima, MAX(Fecha) AS Maxima
+FROM   dbo.Bitacora;
+```
+
+Esa misma consulta destapó, en otra tabla del dominio, fechas de **1900** y de **8202**
+conviviendo: un corte por antigüedad habría borrado las primeras —probablemente registros válidos
+sin fecha poblada— y conservado las segundas para siempre.
+
+**Y no des por hecho que el peso está donde están las filas.** La mayor de todas —48 GB— tenía
+2,79 M de filas y **42,79 GB en unidades de asignación LOB**: 17 KB de HTML por fila. Con
+`allocation_units.type = 2` se separa en una consulta lo que es fila de lo que es LOB, y cambia
+por completo qué técnica de borrado conviene: ahí el coste está en mover el LOB, no en el log de
+transacciones.
+
 ## R-25 · La configuración por defecto de la instancia no es la correcta [obs]
 
 Observado: `cost threshold for parallelism = 5` —el default de fábrica desde 1998— y
@@ -996,6 +1140,27 @@ Tracking con 365 días de retención, que resultó ser el mayor consumidor de CP
 
 Comprueba además los cuatro valores que cambian el diagnóstico de cualquier análisis:
 compat level, RCSI, edición y si hay Always On. Están en `SKILL.md`.
+
+**Sub-caso medido — Change Tracking, por segunda vez y en otra instancia.** La retención de 365
+días volvió a aparecer, y otra vez como **el mayor consumidor de CPU de todo el servidor**:
+**9.161.864 ms** —2 h 33 min— en 11.304 ejecuciones y 107.469.831 lecturas, y con una advertencia
+que multiplica la cifra: esas estadísticas cubrían **3 días**, no el uptime completo, porque el
+plan se había creado tres días antes. Estaba habilitado en 4 bases, con retenciones de 3, 7 y 365
+días conviviendo sin criterio aparente.
+
+Que reaparezca en un entorno distinto no es casualidad: **365 días no es una decisión, es lo que
+queda cuando nadie toca el valor al habilitar la característica.** Revísalo por instancia, no por
+base.
+
+```sql
+SELECT DB_NAME(database_id) AS BaseDeDatos, is_auto_cleanup_on,
+       retention_period, retention_period_units_desc
+FROM   sys.change_tracking_databases;
+```
+
+La huella en el plan cache es reconocible: consultas con `databaseName` nulo sobre
+`internal_table_name`, `start_time` o `sys.syscommittab`. No tienen dueño aparente porque son
+tareas internas del motor, y por eso se pasan por alto en cualquier informe ordenado por base.
 
 **Sub-caso medido — el default que apaga la única captura nativa de bloqueo.**
 `blocked process threshold (s)` viene de fábrica en `0`, y con ese valor el *blocked process
@@ -1094,6 +1259,98 @@ Dos corolarios que aplican a cualquier captura, no sólo a XE:
   alerta de Agent. Lo que **no** funciona es alertar sobre el mensaje de error 1205: la víctima
   de deadlock no se escribe en el log de errores por defecto, así que esa alerta no se dispara
   nunca.
+- **El caso inverso: aquí el ruido se lee como señal.** `sys.dm_os_wait_stats` devuelve mezcladas
+  las esperas reales y las de tareas de fondo que simplemente esperan trabajo. Medido en una
+  instancia: **las cinco esperas mayores sumaban el 80,2 % del total y ninguna era contención**
+  —`HADR_*`, `BROKER_TRANSMITTER`, `LOGMGR_QUEUE`—, tapando por completo el paralelismo que sí
+  importaba. Leído sin filtrar, el diagnóstico habría sido «esta instancia espera por Always On».
+  Filtra siempre con la lista de exclusión conocida antes de ordenar por porcentaje, y añade dos
+  columnas que la lectura ingenua olvida: el **signal wait** de cada espera —el porcentaje de
+  tiempo que la tarea ya estaba lista y solo esperaba CPU— y el número de tareas, que distingue
+  «muchas esperas cortas» de «una espera eterna».
+- **Los totales del plan cache no cubren el uptime.** `sys.dm_exec_query_stats` acumula desde
+  `creation_time` de **cada plan**, no desde el arranque del servidor. En una misma foto convivían
+  una fila con 3 días de historia y otra con unos minutos. Sirve para ordenar por magnitud; sumar
+  sus totales y presentarlos como «el consumo del periodo» es un error. Incluye `creation_time`
+  en toda consulta al plan cache que vaya a un informe.
+
+---
+
+## R-33 · Reducir volumen no es optimizar: mide quién lee la tabla antes de prometer rendimiento [obs]
+
+Un plan de poda se justifica solo. Lo que **no** se justifica solo es la frase que suele
+acompañarlo: «y además la aplicación irá más rápida».
+
+Caso medido: base de **305,72 GB usados**, plan de poda de **119,59 GB** entre reconstrucción de
+heaps, vaciado de bitácoras y corte por antigüedad. Antes de comprometer la ventana se miró
+`sys.dm_db_index_usage_stats`, con 57 días acumulados:
+
+| Tabla candidata | GB | Búsquedas | Escaneos | Escrituras |
+|---|---:|---:|---:|---:|
+| la mayor de la base | 48,00 | **0** | **0** | 2.506 |
+| la segunda | 24,82 | **0** | 2 *(del propio análisis)* | 5.044 |
+| la tercera | 12,87 | **0** | 2 *(del propio análisis)* | 3.365 |
+| una bitácora de proceso | 3,78 | **0** | 1 *(del propio análisis)* | **263.185** |
+| la que la aplicación **sí** usa | 22,18 | **19.642.060** | **0** | 3.365 |
+
+**Las tablas donde estaba todo el espacio recuperable no las leía nadie.** Se escribía en ellas y
+nunca se consultaban. Y la tabla que la aplicación sí castigaba —19,6 millones de búsquedas— se
+accede siempre **por búsqueda**, no por escaneo.
+
+> El coste de una búsqueda en un índice es **logarítmico** respecto al número de filas; el de un
+> escaneo es **lineal**. Quitar el 44,6 % de las filas de una tabla no cambia la profundidad de su
+> árbol: esas 19,6 millones de búsquedas cuestan exactamente lo mismo después de podar. **Toda la
+> ganancia de rendimiento de una reducción de datos se concentra en lo que hace escaneos.** Si
+> nada escanea la tabla, la ganancia es cero.
+
+```sql
+SELECT  t.name, i.index_id, i.type_desc,
+        ISNULL(us.user_seeks,0)   AS Busquedas,
+        ISNULL(us.user_scans,0)   AS Escaneos,
+        ISNULL(us.user_updates,0) AS Escrituras,
+        us.last_user_scan, us.last_user_seek
+FROM    sys.tables t
+        JOIN sys.indexes i ON i.object_id = t.object_id AND i.index_id IN (0,1)
+        LEFT JOIN sys.dm_db_index_usage_stats us
+               ON us.object_id = i.object_id AND us.index_id = i.index_id
+              AND us.database_id = DB_ID()
+WHERE   t.name IN (…las candidatas a poda…);
+```
+
+**Trampa de método, y no es menor: tus propias consultas de análisis contaminan estas
+estadísticas.** En el caso medido, los únicos escaneos registrados sobre cuatro de las cinco
+tablas llevaban marca de tiempo dentro de la ventana en que se ejecutaron los `COUNT(*)` del
+propio análisis. Sin mirar `last_user_scan` se habría concluido que la aplicación sí las lee.
+Compara siempre la hora contra la de tu sesión antes de interpretar el número.
+
+**Lo que una reducción de datos sí compra**, y suele bastar para justificarla: tiempo de backup y
+restore, `DBCC CHECKDB`, duración del ciclo de refresco de los entornos no productivos, y coste
+de disco. Todo ello es operación, no experiencia de usuario. Preséntalo como lo que es.
+
+Y antes de dar por bueno el diagnóstico, comprueba **dónde está de verdad el consumo**: en el
+mismo entorno, el mayor consumidor de CPU del servidor era la limpieza de Change Tracking
+(R-25) y el segundo una función escalar en un `SELECT` (R-14). Ninguno de los dos mejora un
+gramo al reducir volumen de datos.
+
+**La comprobación de dos minutos que decide la conversación entera.** Antes que el uso de
+índices, antes que cualquier conteo: mira cuánto pesa la espera por lectura de página.
+
+| Espera medida en el entorno del caso | % del total |
+|---|---:|
+| `CXPACKET` + `CXCONSUMER` | **12,14 %** |
+| `LATCH_EX` | 4,39 % |
+| `SOS_SCHEDULER_YIELD` | 1,15 % *(99,85 % de ella es señal)* |
+| **`PAGEIOLATCH_SH`** | **0,12 %** |
+
+> Reducir el tamaño de una base reduce E/S. Si la instancia **no espera por E/S**, la reducción no
+> se nota. `PAGEIOLATCH_*` cien veces por debajo del paralelismo es la prueba, y llega por un
+> camino independiente del uso de índices: dos evidencias distintas apuntando a lo mismo.
+
+El recíproco también vale, y es la única forma de rescatar el argumento: si `PAGEIOLATCH_*` sí
+pesa, la reducción de volumen vuelve a la mesa. Mídelo antes de decidir, no después.
+
+Un `SOS_SCHEDULER_YIELD` casi enteramente de **señal** —la tarea ya estaba lista y esperaba
+turno de CPU— apunta a presión de CPU, que se ataca por consultas y no por hardware.
 
 ---
 
