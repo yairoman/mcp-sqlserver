@@ -220,15 +220,23 @@ Finalmente, clic en **Guardar**.
 > que quema horas de CPU no aparece aquí. El criterio sale de R-25 del skill
 > `buenas-practicas-sql`, derivado de auditorías reales.
 
-> **`get_compatibility_assessment` responde «¿qué pasa si subo el compat level?»** Sin
-> `targetLevel` asume el máximo que soporta el motor; sin `database`, resume cuántas bases están
-> por detrás y cuántas podrían migrar sin red. Lo que lo hace fiable es que **no adivina**: lee
+> **`get_compatibility_assessment` responde «¿qué pasa si subo el compat level?»** Acepta
+> `targetLevel` **100 · 110 · 120 · 130 · 140 · 150 · 160 · 170**, es decir de SQL Server 2008 a
+> **SQL Server 2025 (170)**. Si no se indica, asume el máximo que soporta el motor; si se pide uno
+> por encima, lo topa y lo explica, porque una base no puede superar a su motor. Sin `database`,
+> resume cuántas bases están por detrás y cuántas podrían migrar sin red.
+>
+> Lo que lo hace fiable es que **no adivina**: lee
 > `sys.sql_modules.is_inlineable`, o sea la respuesta del propio optimizador sobre qué funciones
 > escalares dejarían de ejecutarse fila por fila. En una base medida: 115 de 176 inlineables, y
 > las 61 restantes seguirán igual a cualquier nivel — eso separa lo que se arregla solo de lo que
 > exige reescritura. Comprueba además Query Store como prerequisito (sin él la subida no es
 > reversible en la práctica), planes forzados, plan guides, configuraciones que entran en
 > conflicto y frescura de estadísticas.
+>
+> ⚠️ Los cambios de comportamiento de **170** son los menos asentados de la tabla, y la propia
+> salida lo advierte: son un punto de partida y hay que contrastarlos con la documentación del
+> build concreto antes de planificar una migración. Los de 140, 150 y 160 sí están firmes.
 
 > **Rendimiento: empieza por el triage.** `get_wait_stats` sin argumentos devuelve el acumulado
 > **desde el arranque del servicio**, que sirve para ver tendencias pero **no** para diagnosticar
