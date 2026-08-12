@@ -37,6 +37,7 @@ import { activeSessionsDefinition, activeSessionsHandler } from "./tools/perform
 import { blockingChainsDefinition, blockingChainsHandler } from "./tools/performance/blocking-chains.js";
 import { blockingHistoryDefinition, blockingHistoryHandler } from "./tools/performance/blocking-history.js";
 import { configurationHealthDefinition, configurationHealthHandler } from "./tools/performance/configuration-health.js";
+import { performanceTriageDefinition, performanceTriageHandler } from "./tools/performance/performance-triage.js";
 import { waitStatsDefinition, waitStatsHandler } from "./tools/performance/wait-stats.js";
 import { tableStatisticsDefinition, tableStatisticsHandler } from "./tools/performance/table-statistics.js";
 import { queryStatsDefinition, queryStatsHandler } from "./tools/performance/query-stats.js";
@@ -101,6 +102,7 @@ export function createServer(config: AppConfig): Server {
     { definition: blockingChainsDefinition, handler: blockingChainsHandler },
     { definition: blockingHistoryDefinition, handler: blockingHistoryHandler },
     { definition: configurationHealthDefinition, handler: configurationHealthHandler },
+    { definition: performanceTriageDefinition, handler: performanceTriageHandler },
     { definition: waitStatsDefinition, handler: waitStatsHandler },
     { definition: tableStatisticsDefinition, handler: tableStatisticsHandler },
     { definition: queryStatsDefinition, handler: queryStatsHandler },

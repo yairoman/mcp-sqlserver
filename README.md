@@ -161,7 +161,7 @@ Finalmente, clic en **Guardar**.
 
 ---
 
-## 🛠️ Tools Disponibles (31)
+## 🛠️ Tools Disponibles (32)
 
 ### 📋 Schema & Metadata (9)
 
@@ -194,7 +194,7 @@ Finalmente, clic en **Guardar**.
 | `explain_query`  | Plan de ejecución estimado                           |
 | `validate_query` | Validación de sintaxis sin ejecutar                  |
 
-### 📈 Performance & Monitoring (9)
+### 📈 Performance & Monitoring (10)
 
 | Tool                    | Descripción                                       |
 | ----------------------- | ------------------------------------------------- |
@@ -203,7 +203,8 @@ Finalmente, clic en **Guardar**.
 | `get_active_sessions`   | Sesiones activas y queries en ejecución           |
 | `get_blocking_chains`   | Cadenas de bloqueo **activas en este instante**   |
 | `get_blocking_history`  | Bloqueos **pasados** (Query Store): quién esperó, cuánto y si se abortó |
-| `get_wait_stats`        | Estadísticas de espera del servidor               |
+| `get_wait_stats`        | Esperas del servidor — acumuladas, o **medidas en una ventana** con `sampleSeconds` |
+| `get_performance_triage` | Mide, clasifica y **dictamina**: ¿el servidor espera o trabaja, y en qué? |
 | `get_table_statistics`  | Estadísticas de columnas y frescura               |
 | `get_query_stats`       | Top queries por CPU/duración/lecturas             |
 | `get_configuration_health` | Audita la configuración del motor y **emite un juicio**: qué está mal, qué debería ser y por qué |
@@ -217,6 +218,18 @@ Finalmente, clic en **Guardar**.
 > Audita **cómo está configurado** el motor, no cómo está escrito el código: una función escalar
 > que quema horas de CPU no aparece aquí. El criterio sale de R-25 del skill
 > `buenas-practicas-sql`, derivado de auditorías reales.
+
+> **Rendimiento: empieza por el triage.** `get_wait_stats` sin argumentos devuelve el acumulado
+> **desde el arranque del servicio**, que sirve para ver tendencias pero **no** para diagnosticar
+> lo que pasa ahora: con días de uptime, una tarde mala queda diluida y las esperas de fondo
+> (hilos ociosos, backups) se comen el ranking. Pasa `sampleSeconds: 30` y toma dos muestras
+> restándolas — en una medición real, el acumulado daba 76 % a un tipo de espera ocioso mientras
+> la ventana de 30 s mostraba tempdb, paralelismo y CPU repartiéndose el 85 %.
+>
+> `get_performance_triage` hace eso y además clasifica las esperas por familia, comprueba si hay
+> algo bloqueado ahora, y devuelve un veredicto con la siguiente tool a ejecutar. Es el primer
+> paso ante un «va lento», antes de mirar consulta alguna: primero se decide si el servidor
+> **espera** o **trabaja**.
 
 > **Bloqueos: cuál usar.** `get_blocking_chains` lee `sys.dm_exec_requests`, así que solo ve lo
 > que está bloqueado **ahora**; si el bloqueo terminó, no deja rastro. Para «¿tuvo bloqueos el
