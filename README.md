@@ -161,7 +161,7 @@ Finalmente, clic en **Guardar**.
 
 ---
 
-## 🛠️ Tools Disponibles (29)
+## 🛠️ Tools Disponibles (33)
 
 ### 📋 Schema & Metadata (9)
 
@@ -194,17 +194,69 @@ Finalmente, clic en **Guardar**.
 | `explain_query`  | Plan de ejecución estimado                           |
 | `validate_query` | Validación de sintaxis sin ejecutar                  |
 
-### 📈 Performance & Monitoring (7)
+### 📈 Performance & Monitoring (11)
 
-| Tool                    | Descripción                             |
-| ----------------------- | --------------------------------------- |
-| `get_index_usage_stats` | Estadísticas de uso de índices          |
-| `get_missing_indexes`   | Índices recomendados por el optimizer   |
-| `get_active_sessions`   | Sesiones activas y queries en ejecución |
-| `get_blocking_chains`   | Cadenas de bloqueo activas              |
-| `get_wait_stats`        | Estadísticas de espera del servidor     |
-| `get_table_statistics`  | Estadísticas de columnas y frescura     |
-| `get_query_stats`       | Top queries por CPU/duración/lecturas   |
+| Tool                    | Descripción                                       |
+| ----------------------- | ------------------------------------------------- |
+| `get_index_usage_stats` | Estadísticas de uso de índices                    |
+| `get_missing_indexes`   | Índices recomendados por el optimizer             |
+| `get_active_sessions`   | Sesiones activas y queries en ejecución           |
+| `get_blocking_chains`   | Cadenas de bloqueo **activas en este instante**   |
+| `get_blocking_history`  | Bloqueos **pasados** (Query Store): quién esperó, cuánto y si se abortó |
+| `get_wait_stats`        | Esperas del servidor — acumuladas, o **medidas en una ventana** con `sampleSeconds` |
+| `get_performance_triage` | Mide, clasifica y **dictamina**: ¿el servidor espera o trabaja, y en qué? |
+| `get_table_statistics`  | Estadísticas de columnas y frescura               |
+| `get_query_stats`       | Top queries por CPU/duración/lecturas             |
+| `get_configuration_health` | Audita la configuración del motor y **emite un juicio**: qué está mal, qué debería ser y por qué |
+| `get_compatibility_assessment` | Assessment de subida de compat level: prerequisitos, qué mejora solo, qué revisar y plan de aplicación |
+
+> **`get_configuration_health` es la única tool que opina.** Las demás devuelven datos; esta los
+> contrasta contra valores conocidos y clasifica cada hallazgo por severidad y por categoría —
+> *Estabilidad*, *Diagnosticabilidad*, *Rendimiento*, *Integridad*—, que es lo que dice qué
+> arreglar primero. Comprueba memoria, MAXDOP, umbral de paralelismo, archivos de tempdb, compat
+> level **contra la versión real del motor**, RCSI, `auto_shrink`/`auto_close`/`page_verify`,
+> retención de Change Tracking, estado de Query Store y si los bloqueos son diagnosticables.
+> Audita **cómo está configurado** el motor, no cómo está escrito el código: una función escalar
+> que quema horas de CPU no aparece aquí. El criterio sale de R-25 del skill
+> `buenas-practicas-sql`, derivado de auditorías reales.
+
+> **`get_compatibility_assessment` responde «¿qué pasa si subo el compat level?»** Acepta
+> `targetLevel` **100 · 110 · 120 · 130 · 140 · 150 · 160 · 170**, es decir de SQL Server 2008 a
+> **SQL Server 2025 (170)**. Si no se indica, asume el máximo que soporta el motor; si se pide uno
+> por encima, lo topa y lo explica, porque una base no puede superar a su motor. Sin `database`,
+> resume cuántas bases están por detrás y cuántas podrían migrar sin red.
+>
+> Lo que lo hace fiable es que **no adivina**: lee
+> `sys.sql_modules.is_inlineable`, o sea la respuesta del propio optimizador sobre qué funciones
+> escalares dejarían de ejecutarse fila por fila. En una base medida: 115 de 176 inlineables, y
+> las 61 restantes seguirán igual a cualquier nivel — eso separa lo que se arregla solo de lo que
+> exige reescritura. Comprueba además Query Store como prerequisito (sin él la subida no es
+> reversible en la práctica), planes forzados, plan guides, configuraciones que entran en
+> conflicto y frescura de estadísticas.
+>
+> ⚠️ Los cambios de comportamiento de **170** son los menos asentados de la tabla, y la propia
+> salida lo advierte: son un punto de partida y hay que contrastarlos con la documentación del
+> build concreto antes de planificar una migración. Los de 140, 150 y 160 sí están firmes.
+
+> **Rendimiento: empieza por el triage.** `get_wait_stats` sin argumentos devuelve el acumulado
+> **desde el arranque del servicio**, que sirve para ver tendencias pero **no** para diagnosticar
+> lo que pasa ahora: con días de uptime, una tarde mala queda diluida y las esperas de fondo
+> (hilos ociosos, backups) se comen el ranking. Pasa `sampleSeconds: 30` y toma dos muestras
+> restándolas — en una medición real, el acumulado daba 76 % a un tipo de espera ocioso mientras
+> la ventana de 30 s mostraba tempdb, paralelismo y CPU repartiéndose el 85 %.
+>
+> `get_performance_triage` hace eso y además clasifica las esperas por familia, comprueba si hay
+> algo bloqueado ahora, y devuelve un veredicto con la siguiente tool a ejecutar. Es el primer
+> paso ante un «va lento», antes de mirar consulta alguna: primero se decide si el servidor
+> **espera** o **trabaja**.
+
+> **Bloqueos: cuál usar.** `get_blocking_chains` lee `sys.dm_exec_requests`, así que solo ve lo
+> que está bloqueado **ahora**; si el bloqueo terminó, no deja rastro. Para «¿tuvo bloqueos el
+> servidor hoy?» usa `get_blocking_history`, que reconstruye el pasado desde Query Store.
+> Sin argumentos barre todas las bases y devuelve un resumen; con `database` lista las consultas
+> que esperaron. Query Store registra **quién esperó, no quién bloqueó**: para la cadena
+> bloqueador→bloqueado hace falta el *blocked process report* (`blocked process threshold` > 0
+> más una sesión de Extended Events), y la tool avisa si está apagado.
 
 ### 🔍 Integrity & Analysis (6)
 
