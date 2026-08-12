@@ -2,7 +2,7 @@ import type { AppConfig } from "../../config.js";
 import { executeQuery, executeQueryOnDatabase } from "../../connection.js";
 
 /** Compatibility levels a modern engine still accepts, oldest first. */
-const KNOWN_LEVELS = [100, 110, 120, 130, 140, 150, 160];
+const KNOWN_LEVELS = [100, 110, 120, 130, 140, 150, 160, 170];
 
 const LEVEL_NAMES: Record<number, string> = {
   100: "SQL Server 2008",
@@ -12,6 +12,7 @@ const LEVEL_NAMES: Record<number, string> = {
   140: "SQL Server 2017",
   150: "SQL Server 2019",
   160: "SQL Server 2022",
+  170: "SQL Server 2025",
 };
 
 /**
@@ -37,6 +38,11 @@ const LEVEL_CHANGES: Record<number, string[]> = {
     "Parameter Sensitive Plan optimization: one statement can hold several plans for different parameter values, aimed squarely at parameter sniffing.",
     "Memory grant feedback persistence: corrections survive a restart instead of being relearned.",
     "Degree of parallelism feedback, and cardinality estimation feedback.",
+  ],
+  170: [
+    "Optimized Halloween Protection: update plans stop needing a blocking spool to guarantee correctness, which cuts tempdb usage and speeds up large updates.",
+    "Further optimizer feedback: the cardinality estimation and parallelism corrections introduced at 160 are widened and persisted more aggressively.",
+    "⚠️ This level is recent, so treat this list as a starting point and confirm the specifics against the documentation for your exact build before planning a migration.",
   ],
 };
 
