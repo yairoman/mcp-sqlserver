@@ -9,6 +9,123 @@ señal de que son estilo del equipo y no descuidos.
 
 ---
 
+## v14 — 2026-08-17 · El `DELETE` de la alerta no era el que bloqueaba
+
+**Origen:** dos alertas de bloqueo en producción el mismo día, ambas con el mismo par: un paso de
+job de SQL Agent —comando `DELETE`— reteniendo a un proceso de aplicación en `UPDATE`. La lectura
+intuitiva era que el `DELETE` bloqueaba. Era falsa: los `DELETE` del proceso iban **todos contra
+tablas temporales**. Lo que bloqueaba eran los locks acumulados por los `INSERT` anteriores,
+retenidos porque una transacción abierta al principio del bucle no confirmaba hasta el final —
+medido, **3.328 s** en la corrida pesada.
+
+**Dos reglas nuevas y tres reforzadas.**
+
+**Reglas nuevas:**
+
+| Regla | Por qué se añadió |
+|---|---|
+| **R-37** Una reescritura equivalente puede costar 48 veces más | El catálogo ya exigía demostrar que una reescritura no cambia el resultado; faltaba la otra mitad. Sacar una condición de la tabla externa fuera de un `NOT EXISTS` es estrictamente equivalente con la columna `NOT NULL`, y midió **179 ms → 7.311 ms**. Se descartó el cambio. Aporta además el método: ejecutar aisladas, repetir contra la caché, y documentar el descarte con su cifra |
+| **R-38** Código ejecutable guardado como datos no existe para el motor | 39 scripts de 10 a 82 KB viviendo en filas de una tabla. `sys.dm_sql_referencing_entities` devolvía **0 filas** y `sys.sql_modules` encontraba **1 objeto** donde en realidad 39 scripts escribían en tablas de 3,16 M y 7,7 M. El mapa de dependencias previo a un `sp_rename` sale limpio y es falso |
+
+**Reglas reforzadas:**
+
+- **R-09** (`NOLOCK` en lecturas que deciden una escritura): sub-caso nuevo y **el hallazgo de
+  fondo de la investigación**. Hasta ahora la regla se apoyaba en duplicados, que un `UNIQUE`
+  neutraliza. Aquí la lectura sucia dispara un efecto **fuera de la base**: el lector consulta la
+  cola con `(NOLOCK)`, ve filas que el job aún no confirmó, **el servicio envía el correo**, y solo
+  después el `UPDATE` choca con el lock. El bloqueo es el síntoma; el defecto es que un `ROLLBACK`
+  no revierte un correo enviado. Quedan envíos sin rastro y candidatos a reenvío. La pregunta que
+  añade al diagnóstico: *quién leyó la fila antes de que existiera, y qué hizo con ella*.
+
+- **R-04** (transacciones cortas): sub-caso nuevo, **la transacción que envuelve código que no
+  puedes leer** — `sp_executesql` sobre scripts guardados como filas. Con él llega la señal que
+  conviene interiorizar: la duración deja de correlacionar con el volumen. Mismo día, misma
+  instancia: 3.445 filas encoladas en 3.328 s, y **10 filas en 2.714 s**. Un `BEGIN TRAN` cuyo
+  coste no correlaciona con el trabajo útil no se ajusta, se acota.
+
+- **R-11** (un `CATCH` vacío es un error que nadie verá): sub-caso desde el lado del llamador.
+  `IF @@ERROR <> 0` después de un `EXEC` es una comprobación que **parece** existir: si el código
+  ejecutado trae su propio `TRY/CATCH` y no relanza, `@@ERROR` vale 0. Medido: **12 de 39**
+  scripts lo traían, y el job cerraba informando de que todo se había ejecutado correctamente.
+  Se enlaza con R-26 por el segundo fallo del mismo patrón: sin `XACT_ABORT`, el bucle sigue con
+  la transacción abierta.
+
+**Revisado y sin cambios:** R-01 (el `CONVERT(VarChar(8), Fecha, 112)` sobre un heap de 1,42 M
+filas es el caso de manual, ya cubierto), R-23 (índice sin uso y redundante por prefijo — la regla
+ya advertía de comprobar los días de arranque antes de un `DROP`, y aquí eran 5), R-24 (heaps
+grandes) y R-32.
+
+**No promovido por no estar verificado:** la sospecha de que
+`UPDATE <tabla> ... FROM <tabla> <alias>` resuelve como producto cartesiano en vez de
+correlacionar. Comprobarlo exige escribir y la sesión de análisis fue de solo lectura. Quedó como
+hallazgo abierto en el informe, con un test de tres filas para resolverlo en dos minutos. Si se
+confirma, entra al catálogo entonces — no antes.
+
+**Nota de método.** La medición cambió la entrega dos veces. La reescritura que iba a entregarse
+incluía el cambio que R-37 documenta, y solo se detectó porque la prueba de coste se corrió antes
+de cerrar. Y una nota de memoria previa —«sin acceso a `msdb.sysjobsteps`»— resultó falsa en esta
+cuenta: el mapa de dependencias sí se pudo completar. Conviene reverificar las restricciones
+heredadas en vez de darlas por buenas.
+
+---
+
+## v13 — 2026-08-14 · El bloqueo que ninguna de las dos herramientas de monitoreo podía ver
+
+**Origen:** una pregunta de dos minutos —«¿hubo bloqueos hoy?»— que al tirar del hilo destapó un
+hueco estructural de observabilidad. Query Store registraba esperas por lock de **20,5 s**, dos
+madrugadas consecutivas a la misma hora y con el mismo `query_id`, pero no puede nombrar al
+bloqueador. El job de vigilancia sí lo nombra, y sin embargo no había registrado nada: en **14
+días** solo tenía **2 episodios**, ambos ruido. Ninguna de las dos herramientas fallaba; las dos
+medían fuera de la banda donde ocurrían los hechos.
+
+**Una regla nueva y dos reforzadas.**
+
+**Regla nueva:**
+
+- **R-36** (`READPAST` en una escritura salta filas en silencio). Es idiomático en la *lectura* de
+  una cola y un defecto en la *escritura*: el motor omite las filas bloqueadas, devuelve un
+  `@@ROWCOUNT` menor y no avisa. Lo que le da la severidad es la combinación con el guard de
+  «trabajo en vuelo» (`IF EXISTS (... estado = 1) RETURN`) que acompaña a estos procesos: **una
+  sola fila atascada detiene la cola completa, de forma permanente y silenciosa**, con el job
+  reportando éxito. Medido sobre una tabla de cola de **43.650 filas**. Es un interbloqueo lógico
+  que ninguna herramienta de bloqueo detecta, porque no hay ningún lock esperando a nadie.
+
+**Reglas reforzadas:**
+
+- **R-04** (transacciones cortas, nunca envuelvan trabajo externo): sub-caso nuevo, **la llamada
+  HTTP síncrona dentro de la transacción**. «Trabajo externo» se venía leyendo como *otro
+  procedimiento*; el que de verdad hace daño es la salida a la red. Un procedimiento de cola abría
+  `BEGIN TRANSACTION` y dentro hacía un `POST` con `sp_OACreate 'MSXML2.ServerXMLHTTP'`: la
+  duración del lock la decidía un servidor web. **20.517 ms y 18.861 ms** medidos en dos
+  madrugadas. Y el agravante que convierte lo crónico en incidente: el objeto COM se instanciaba
+  **sin `setTimeouts`**, así que el peor caso no estaba acotado por nada. Aporta la mitigación
+  barata para cuando el rediseño no cabe todavía, y la consulta de detección por
+  `sp_OACreate`/`ServerXMLHTTP` más el interruptor de instancia que lo habilita.
+
+- **R-28** (la instrumentación de diagnóstico también se audita): dos corolarios nuevos.
+
+  El primero, **el suelo de detección de un monitor por muestreo**. Si la regla de disparo exige
+  ver el síntoma en N muestras consecutivas, el umbral real es `(N-1) × intervalo`, no el
+  intervalo. Medido: muestreo cada **5 min** con disparo a la segunda foto ⇒ suelo efectivo de
+  **5 minutos**, contra eventos reales de **1 s a 5 min**. El instrumento no fallaba: empezaba a
+  medir justo donde terminaban los hechos. Con el agravante de segundo orden de que un monitor que
+  solo alerta por ruido acaba ignorado, lo que deja el hueco sin cubrir *y* sin que nadie lo note.
+
+  El segundo, **que el par bloqueador-bloqueado no se reconstruye a posteriori**. Query Store
+  registra quién esperó, nunca quién retuvo; atribuir el bloqueo desde ahí es inferencia temporal,
+  no prueba. Lo que lo nombra con evidencia es el blocked process report **más** una sesión de
+  Extended Events que lo recoja — y activar uno sin el otro produce la peor situación posible: la
+  impresión de que hay monitoreo donde no lo hay.
+
+**Nota de método.** La investigación no produjo ninguna reescritura, y la razón se documentó en el
+informe en vez de disimularse: la cuenta del análisis tenía `SELECT` denegado sobre las tablas del
+monitor y `VIEW DEFINITION` denegado sobre los procedimientos de `master` —al punto de que el
+objeto no aparecía en `sys.objects` y `OBJECT_ID()` devolvía `NULL`, que se lee como «no existe»
+cuando significa «no lo puedes ver»—. Sin poder leer el estado no hay verificación posible, así que
+se entregaron **parches dirigidos** en lugar de un `_v2`, marcados como no verificados.
+
+---
+
 ## v12 — 2026-08-11 · El procedimiento que se abrió por lento y resultó estar mal
 
 **Origen:** continuación directa de v11. El benchmark de migración detectó que el paralelismo era el

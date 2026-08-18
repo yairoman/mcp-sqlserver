@@ -53,12 +53,14 @@ Cada punto enlaza con su regla en [`reglas.md`](reglas.md).
 - [ ] Se usa `SAVE TRANSACTION` + `XACT_STATE()` si el código puede correr anidado · **R-10**
 - [ ] La ventana de bloqueo se midió hasta el `COMMIT` que deja `@@TRANCOUNT` en 0, no hasta el primero que aparece · **R-10**
 - [ ] Ningún `CATCH` termina sin `;THROW;` — o justifica por escrito por qué no · **R-11**
+- [ ] El control de error tras un `EXEC` no es `IF @@ERROR <> 0`: si el código llamado captura y no relanza, esa comprobación no ve nada · **R-11**
 - [ ] El orden de escritura de tablas respeta el orden canónico del resto de objetos · **R-27**
 
 ## Concurrencia e integridad
 
 - [ ] Todo parámetro de identificador se valida antes de usarlo en el `WHERE` de un `UPDATE`/`DELETE` — `0` y `''` no designan una entidad · **R-29**
 - [ ] `NOLOCK` no aparece en ninguna lectura que decida un `INSERT`/`UPDATE` · **R-09**
+- [ ] Ninguna lectura con `NOLOCK` gobierna un efecto **fuera** de la base — correo, fichero, API: un `ROLLBACK` no los revierte · **R-09**
 - [ ] Los hints son consistentes: no hay sentencias sueltas sin hint en un objeto que sí los usa · **R-09**
 - [ ] Ningún ID se genera con `MAX(id) + 1` · **R-08**
 - [ ] Las operaciones que deben ser idempotentes están respaldadas por una restricción `UNIQUE` · **R-08**
@@ -81,6 +83,13 @@ Cada punto enlaza con su regla en [`reglas.md`](reglas.md).
 - [ ] Lo que un job de diagnóstico encuentra se persiste en algún sitio · **R-28**
 - [ ] Si se propone una poda o archivado, se midió **quién lee** esas tablas antes de prometer rendimiento · **R-33**
 - [ ] Los escaneos que aparecen en `dm_db_index_usage_stats` no son los del propio análisis — comprobar `last_user_scan` · **R-33**
+- [ ] Si el objeto hace `sp_executesql` sobre contenido de una tabla, el mapa de dependencias del motor está incompleto: inventariar ese catálogo aparte · **R-38**
+
+## Antes de entregar una reescritura
+
+- [ ] Se demostró que **no cambia el resultado**: `EXCEPT` en las dos direcciones · **R-37**
+- [ ] Se demostró que **no cuesta más**: las dos formas ejecutadas aisladas y repetidas, con su duración anotada · **R-37**
+- [ ] Todo cambio descartado se documenta **con su cifra**, para que el siguiente no lo reintente · **R-37**
 
 ## Higiene
 

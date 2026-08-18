@@ -138,6 +138,56 @@ FROM sys.sql_modules
 WHERE definition LIKE '%BEGIN TRAN%' AND definition LIKE '%EXEC%';
 ```
 
+**El sub-caso peor: la llamada HTTP dentro de la transacción.** «Trabajo externo» suele leerse
+como *otro procedimiento*, y el que de verdad hace daño es la salida a la red. Caso medido: un
+procedimiento de cola abre `BEGIN TRANSACTION` y dentro invoca un envoltorio que hace
+`sp_OACreate 'MSXML2.ServerXMLHTTP'` y un `POST` **síncrono**. La duración del lock deja de
+decidirla SQL Server y pasa a decidirla un servidor web. Medido en Query Store: **20.517 ms y
+18.861 ms de espera por bloqueo**, dos madrugadas consecutivas a la misma hora, mismo `query_id`.
+
+Y el detalle que convierte el problema crónico en incidente: el objeto COM se instanciaba **sin
+llamar a `setTimeouts`**, de modo que el peor caso no estaba acotado por nada. Mientras el
+servicio responda en segundos, el síntoma es un job lento de madrugada; el día que no responda,
+la transacción queda abierta reteniendo locks hasta que alguien mate la sesión.
+
+> Si la llamada externa no puede salir de la transacción hoy, **acota el peor caso**:
+> `sp_OAMethod @obj, 'setTimeouts', NULL, 5000, 5000, 15000, 15000`. No arregla el diseño —
+> sustituye «indefinido» por un número conocido, que es lo que permite dormir.
+
+```sql
+-- DETECCIÓN: salida a la red dentro de un módulo (revisar si hay transacción alrededor)
+SELECT OBJECT_NAME(object_id) AS objeto
+FROM sys.sql_modules
+WHERE definition LIKE '%sp_OACreate%' OR definition LIKE '%ServerXMLHTTP%';
+-- Y el interruptor que lo habilita, a nivel de instancia:
+SELECT name, value_in_use FROM sys.configurations
+WHERE name IN ('Ole Automation Procedures', 'clr enabled');
+```
+
+**El otro sub-caso: la transacción envuelve código que no puedes leer.** Cuando lo que va dentro
+del `BEGIN TRAN` es `sp_executesql` sobre un script **guardado como fila de una tabla**, la
+duración del lock no la decide el procedimiento: la decide el contenido de esa tabla, que cambia
+sin pasar por revisión de código. Caso medido: un despachador de 211 líneas abría transacción
+antes de su bucle y dentro ejecutaba hasta **39 scripts de 10 a 82 KB cada uno**, 9 de ellos con
+cursores propios.
+
+Y de ahí sale la señal que conviene interiorizar: **la duración deja de estar acotada por el
+volumen.** Medido sobre las marcas de tiempo reales de las filas encoladas, en un mismo día:
+
+| Corrida | Filas encoladas | Ventana de la transacción |
+|---|---|---|
+| 09:00 | 3.445 | **3.328 s** (55 min) |
+| 11:00 | — | 2.318 s (38 min) |
+| 17:00 | **10** | 2.714 s (45 min) |
+
+Tres cuartos de hora de locks acumulados para encolar diez filas. Un `BEGIN TRAN` cuyo coste no
+correlaciona con el trabajo útil no se ajusta: se acota, moviendo el `COMMIT` dentro del bucle
+para que la unidad atómica sea una iteración y no la corrida entera.
+
+> Antes de defender una transacción global, pregunta qué exige realmente ser atómico. «Todas las
+> notificaciones o ninguna» casi nunca es un requisito de negocio: es lo que salió de poner el
+> `BEGIN TRAN` en la primera línea.
+
 ## R-05 · `SELECT ... INTO #temp` en una consulta larga bloquea la instancia entera [obs]
 
 **Severidad:** crítica
@@ -450,6 +500,28 @@ larga, y +14 bytes por fila en las filas versionadas. No es gratis — es mejor.
 **`NOLOCK` parcial es peor que ninguno**: basta una sentencia sin hint para entrar en la cadena
 de bloqueo. Contar hints contra número de tablas del objeto.
 
+**El sub-caso que no se arregla con un `UNIQUE`: la lectura sucia dispara un efecto externo
+irreversible.** Los duplicados de arriba se pueden neutralizar con una restricción. Esto no.
+
+Patrón medido, en una cola de envío de correo de **3,16 M filas**:
+
+1. Un job escribe las notificaciones dentro de una transacción larga —ver R-04— y aún no confirma.
+2. El lector que alimenta al servicio de envío consulta la cola **con `(NOLOCK)`** y ve esas filas.
+3. El servicio **envía el correo**.
+4. Al intentar marcarlo como enviado, el `UPDATE` choca con el lock X del job y se bloquea.
+
+El bloqueo del paso 4 es el síntoma visible y es lo que dispara la alerta. El defecto está en el
+paso 3: si la transacción revierte, **el correo ya salió** y la fila que lo registraba desaparece.
+El `UPDATE` termina afectando a 0 filas, en silencio, y la notificación vuelve a ser candidata en
+la siguiente corrida. Quedan envíos sin rastro y con posibilidad de reenvío.
+
+> Un `ROLLBACK` revierte lo que está dentro de la base. No revierte un correo, un fichero escrito
+> ni una llamada a una API. Cuando una lectura sucia gobierna un efecto **fuera** del motor, no
+> hay compensación posible: el hint tiene que salir.
+
+Al diagnosticar, no te quedes en la cadena de bloqueo. Pregunta **quién leyó la fila antes de que
+existiera** y qué hizo con ella.
+
 ## R-10 · No abras transacciones con nombre dentro de un trigger o SP anidado [obs]
 
 Observado: dos triggers hacen `BEGIN TRAN <nombre>` y en el `CATCH` hacen
@@ -497,6 +569,37 @@ siguen. Los fallos de integración desaparecen sin rastro.
 > Todo `CATCH` termina en `;THROW;` **o** registra **y** relanza. Si el negocio exige continuar
 > ante el fallo, que sea una decisión explícita y comentada, no el efecto secundario de un
 > `CATCH` vacío.
+
+**El sub-caso desde el otro lado: `@@ERROR` no ve lo que el llamado ya capturó.** Un despachador
+que ejecuta código ajeno y comprueba el resultado así:
+
+```sql
+-- ANTI-PATRÓN: el control de error del llamador
+EXECUTE sp_executesql @Script, @DefinicionParams, @param1 = @valor1;
+IF @@ERROR <> 0
+ BEGIN
+    ROLLBACK TRAN MiTransaccion;
+    ...
+ END
+```
+
+Si el script ejecutado trae su propio `TRY/CATCH` y **no relanza**, el error muere ahí dentro:
+`@@ERROR` vale 0 y el despachador reporta éxito. Medido: **12 de 39** scripts de un catálogo
+tenían `TRY/CATCH` propio. El job terminaba informando de que todo se había ejecutado
+correctamente, sin garantía alguna de que así fuera.
+
+Dos fallos se suman aquí, y conviene separarlos:
+
+- `@@ERROR` refleja **la última sentencia**, y sólo los errores que llegaron a la sesión. Ni ve
+  lo capturado abajo, ni sobrevive a una sentencia intermedia.
+- Sin `SET XACT_ABORT ON`, un error que aborta la sentencia pero no el lote deja el bucle
+  corriendo **con la transacción abierta**. Si además el cliente corta, queda un head blocker
+  dormido — R-26.
+
+> Si ejecutas código que no controlas, envuélvelo en tu propio `TRY/CATCH` con
+> `SET XACT_ABORT ON` y quédate con `ERROR_MESSAGE()`. `IF @@ERROR <> 0` después de un `EXEC` es
+> una comprobación que **parece** existir. Y un `CATCH` que traga sin relanzar no sólo oculta el
+> error a su autor: se lo oculta a todos sus llamadores.
 
 ## R-12 · Determinismo: `TOP` sin `ORDER BY`, variables desde `SELECT` [obs]
 
@@ -768,6 +871,67 @@ Detección: no hay consulta que lo encuentre. Se detecta leyendo cada `IF`/`ELSE
 preguntándose qué es verdad, por construcción, al entrar en esa rama. Verificación barata antes
 de borrar: reproducir la lógica vieja y la nueva como expresiones `CASE` sobre un lote real y
 contrastarlas con `EXCEPT` en las dos direcciones (ver skill `analisis-bd`).
+
+---
+
+## R-36 · `READPAST` en una escritura salta filas en silencio [obs]
+
+**Severidad:** alta
+
+`READPAST` en una lectura de cola es idiomático: sirve para que varios trabajadores tomen lotes
+distintos sin pisarse. En una **escritura** cambia de significado y casi nadie lo nota: el motor
+no espera a las filas bloqueadas ni falla — **las omite**, y la sentencia informa un
+`@@ROWCOUNT` menor sin ningún aviso.
+
+Caso observado, en un procedimiento de cola disparado por un planificador externo cada pocos
+minutos sobre una tabla de **43.650 filas**:
+
+```sql
+-- El patrón, tal cual se encontró
+UPDATE q SET estado = 2, fin = GETDATE()
+FROM dbo.ColaProceso AS q (READPAST)      -- ← si la fila está bloqueada, no se actualiza
+INNER JOIN #Lote AS l ON l.id = q.id;     --   y nadie se entera
+```
+
+Una fila marcada como *en vuelo* al inicio del proceso puede así **no llegar nunca a su estado
+final**. Por sí solo eso ya es una fuga de datos de proceso; lo que lo vuelve grave es la
+combinación con el guard que suele acompañar a estos procedimientos:
+
+```sql
+-- Al inicio del mismo procedimiento
+IF EXISTS (SELECT TOP 1 1 FROM dbo.ColaProceso WITH (NOLOCK) WHERE estado = 1)
+    RETURN;                                -- ← "ya hay trabajo en vuelo, no arranques"
+```
+
+**Una sola fila atascada en el estado intermedio detiene la cola completa, para siempre**, hasta
+que una persona la corrija a mano. El proceso no falla, no registra error y su job sigue
+reportando éxito: simplemente deja de hacer trabajo. Es un interbloqueo lógico que ninguna
+herramienta de bloqueo detecta, porque no hay ningún lock esperando a nadie.
+
+> `READPAST` en un `SELECT` de cola: correcto. En un `UPDATE` o `DELETE`: casi siempre un
+> defecto. Y si el proceso tiene un guard de «trabajo en vuelo», **la vigilancia de filas
+> atascadas es obligatoria**, no opcional.
+
+```sql
+-- DETECCIÓN: escrituras con READPAST (revisar a mano; el orden de las palabras varía)
+SELECT OBJECT_NAME(object_id) AS objeto
+FROM sys.sql_modules
+WHERE definition LIKE '%READPAST%'
+  AND (definition LIKE '%UPDATE%' OR definition LIKE '%DELETE%');
+
+-- VIGILANCIA: filas ancladas en el estado intermedio
+SELECT COUNT(*) AS atascadas, MIN(inicio) AS masAntigua
+FROM dbo.ColaProceso
+WHERE estado = 1 AND inicio < DATEADD(minute, -15, GETDATE());
+```
+
+El arreglo por defecto es quitar el `READPAST` de la escritura. Ojo: **cambia el comportamiento
+de concurrencia** del proceso —pasa de saltar a esperar—, así que es una decisión del dueño
+funcional, no del que audita. Cuando no se pueda tocar, la vigilancia de arriba convierte un
+fallo silencioso e indefinido en una alerta de 15 minutos.
+
+Relacionada con R-09 (`NOLOCK` en lecturas que deciden), R-11 (el error que nadie ve) y R-28
+(la instrumentación también se audita).
 
 ---
 
@@ -1321,6 +1485,24 @@ Dos corolarios que aplican a cualquier captura, no sólo a XE:
   inflando la cifra dos órdenes de magnitud. Antes de publicar una medición sacada así,
   **imprime el texto de lo capturado y compruébalo**; y excluye el propio instrumento
   (`AND qt.query_sql_text NOT LIKE '%query_store%'`) o usa marcadores mutuamente excluyentes.
+- **Un monitor por muestreo tiene un suelo de detección, y casi nunca es el de su intervalo.**
+  Si la regla de disparo exige que el síntoma aparezca en **N muestras consecutivas**, el umbral
+  real no es el intervalo sino `(N-1) × intervalo`. Caso medido: un job de vigilancia de bloqueos
+  corría cada **5 min** y solo alertaba con `contador > 1` —es decir, dos fotos seguidas—, así que
+  su suelo efectivo eran **5 minutos**, no 5 segundos ni 5 minutos de resolución. En 14 días
+  registró **2 episodios**, ambos ruido (una base de pruebas y el IntelliSense de una sesión de
+  SSMS), mientras Query Store registraba esperas por lock **a diario**. El instrumento no fallaba:
+  empezaba a medir justo donde terminaban los eventos reales, de 1 s a 5 min. Antes de leer un
+  historial vacío como «no pasó nada», **calcula el suelo del instrumento y compáralo con la
+  duración de lo que buscas**. Y desconfía de la conclusión intermedia: un monitor que solo alerta
+  por ruido acaba ignorado, lo que deja el hueco sin cubrir *y* sin que nadie lo note.
+- **El par bloqueador-bloqueado no se reconstruye a posteriori sin haberlo capturado.** Query Store
+  registra **quién esperó**, nunca quién retuvo el lock; identificar al causante desde ahí es
+  inferencia por coincidencia temporal, no prueba. Lo que lo nombra con evidencia es el blocked
+  process report (`blocked process threshold (s)`, apagado en `0` por defecto) **más una sesión de
+  Extended Events que lo recoja**: el umbral solo emite el evento, y sin consumidor no queda rastro
+  en ninguna parte. Activar uno sin el otro produce la peor situación posible — la impresión de que
+  hay monitoreo donde no lo hay.
 - **Y la variante que no es tuya: la herramienta del que mira.** El sub-caso anterior se corrige
   excluyendo el propio instrumento; éste no, porque el ruido lo mete **otra persona con SSMS
   abierto**. El Object Explorer y los diálogos de propiedades emiten consultas de catálogo
@@ -1698,6 +1880,110 @@ mejora posterior — en las bases que no lo tenían, no existe línea base y ya 
 
 Relacionada con R-25 (configuración por defecto), R-28 (medir antes de concluir), R-06, R-14 y
 R-19 (lo que el compat level habilita).
+
+---
+
+## R-37 · Una reescritura equivalente puede costar 48 veces más: mídela, no la razones [obs]
+
+**Severidad:** media — pero se cobra en el momento peor, al entregar.
+
+El catálogo insiste en demostrar que una reescritura **no cambia el resultado**. Esta regla es la
+otra mitad: demostrar que **no cuesta más**. Son dos pruebas distintas y la segunda se olvida,
+porque el cambio "se ve" mejor.
+
+Caso medido. Un `NOT EXISTS` correlacionado llevaba dentro una condición de la tabla **externa**:
+
+```sql
+-- ORIGINAL
+WHERE NOT EXISTS (
+    SELECT 1 FROM dbo.Historial h
+    WHERE  h.col1 = t.col1
+      AND  h.col2 = t.col2
+      AND  t.Bandera = 1                      -- condición de la tabla EXTERNA, dentro
+      AND  h.Fecha >= @Hoy AND h.Fecha < DATEADD(Day, 1, @Hoy))
+```
+
+Sacarla al predicado externo parece la limpieza obvia, y es **estrictamente equivalente** cuando
+la columna es `NOT NULL` —conviene comprobarlo: con `NULL` permitido, `Bandera <> 1` es `UNKNOWN`
+y el conjunto cambia—:
+
+```sql
+-- REESCRITURA "LIMPIA": equivalente, y 48 veces más lenta
+WHERE (t.Bandera = 0 OR NOT EXISTS (SELECT 1 FROM dbo.Historial h WHERE ...))
+```
+
+Medido sobre la misma instancia, misma salida de 3 filas, dos ejecuciones cada una:
+
+| Forma | Duración |
+|---|---|
+| Original, condición dentro | 179 ms |
+| Solo el predicado de fecha hecho sargable | **154 ms** |
+| Condición fuera, reformulada con `OR` | **7.311 ms / 7.540 ms** |
+
+El `OR` impide resolver el `NOT EXISTS` como semi-join y el plan se degrada. Dato que remata el
+caso: **las 85 configuraciones tenían `Bandera = 1`**, así que la rama nueva no aportaba nada ni
+funcionalmente. Se descartó el cambio y se conservó la forma original.
+
+> Una condición de la tabla externa dentro de un `EXISTS` no es un error: actúa como filtro de
+> arranque y le permite al motor saltarse la sonda. Sacarla al `WHERE` con un `OR` es
+> exactamente el movimiento que rompe el semi-join.
+
+Método, que es lo que de verdad transfiere:
+
+1. Ejecuta las dos formas **aisladas**, una detrás de otra, y anota la duración de cada una.
+2. Desconfía de la primera medición: la caché favorece a la que corriste antes. Repite.
+3. Si no puedes ver el plan —`SHOWPLAN` denegado es habitual en cuentas de solo lectura, error
+   262—, la medición repetida sigue siendo prueba suficiente para **descartar** un cambio.
+4. Un cambio descartado se documenta con su cifra. Es lo que evita que el siguiente lo reintente.
+
+Relacionada con R-21 y R-32 (formas del semi-join), y con la regla transversal de `SKILL.md`:
+ningún cambio de conjunto es mecánico.
+
+---
+
+## R-38 · Código ejecutable guardado como datos no existe para el motor [obs]
+
+**Severidad:** media — alta cuando toca hacer un cutover.
+
+Cuando la lógica vive en una **columna** y se ejecuta con `sp_executesql`, desaparece de toda la
+instrumentación que usas para razonar sobre el esquema. No es una opinión de arquitectura: es una
+lista concreta de cosas que dejan de funcionar.
+
+Caso medido: un despachador ejecutaba **39 scripts** guardados como filas, de 10.453 a 81.543
+caracteres cada uno. Los 39 escribían en dos tablas de 3,16 M y 7,7 M filas.
+
+| Lo que preguntas | Lo que responde | Lo que es verdad |
+|---|---|---|
+| `sys.dm_sql_referencing_entities` sobre el despachador | **0 filas** | Lo llama un job cada hora |
+| `sys.sql_modules` con `LIKE '%TablaCritica%'` | **1 objeto** | 39 scripts la escriben |
+| Búsqueda de `DELETE` en el esquema | nada | 16 scripts tienen `DELETE` |
+| Revisión de código sobre el repositorio | nada | ~1,2 MB de T-SQL ejecutable |
+
+La consecuencia práctica muerde en el peor momento: **el mapa de dependencias previo a un
+`sp_rename` sale limpio y es falso.** Y a diario, ese código no pasa por revisión, no tiene
+historial, y cambia en producción con un `UPDATE`.
+
+```sql
+-- DETECCIÓN: columnas de texto que en realidad contienen T-SQL
+SELECT TOP (50) OBJECT_NAME(c.object_id) AS tabla, c.name AS columna
+FROM   sys.columns c
+JOIN   sys.types  t ON t.user_type_id = c.user_type_id
+WHERE  t.name IN ('varchar','nvarchar','text','ntext') AND c.max_length IN (-1, 8000)
+ORDER  BY 1, 2;
+-- Y sobre las candidatas, el conteo que lo confirma:
+-- SELECT COUNT(*) FROM dbo.Tabla WHERE col LIKE '%SELECT%' AND col LIKE '%FROM%';
+```
+
+> Si no puedes sacar la lógica de la tabla, al menos **inventaríala**: cuántas filas, qué tablas
+> tocan, cuáles escriben, cuáles traen cursores o `TRY/CATCH` propio. Ese inventario es el
+> sustituto del mapa de dependencias que el motor no te va a dar, y se construye con `LIKE` sobre
+> la columna en una sola consulta.
+
+Al auditar un objeto que hace `sp_executesql` sobre contenido de tabla, el objeto **no es la
+unidad de análisis**: lo es el objeto más su catálogo de scripts.
+
+Relacionada con R-04 (la transacción que envuelve código que no puedes leer), R-11 (el `CATCH`
+del llamado que anula el `@@ERROR` del llamador) y R-18 (parámetros como cadena).
 
 ---
 

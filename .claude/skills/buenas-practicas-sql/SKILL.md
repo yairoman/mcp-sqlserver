@@ -5,7 +5,7 @@ description: Base de conocimiento viva de buenas prácticas y anti-patrones de T
 
 # Buenas prácticas T-SQL — base de conocimiento
 
-**35 reglas en 4 niveles.** Ninguna es genérica de manual: cada una salió de un problema real
+**38 reglas en 4 niveles.** Ninguna es genérica de manual: cada una salió de un problema real
 medido en código productivo —o, en las marcadas `[gen]`, de un mecanismo conocido del motor
 que este entorno tiene todas las condiciones para sufrir— con su costo y su consulta de
 detección.
@@ -71,6 +71,7 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-26** | `SET XACT_ABORT ON` en todo procedimiento con transacciones — *el head blocker dormido* |
 | **R-30** | Un filtro nuevo se aplica a **todas** las condiciones hermanas, no solo a la del ticket |
 | **R-31** | Una condición que ya es cierta dentro de su propia rama: el bloque que nunca decide |
+| **R-36** | `READPAST` en una escritura salta filas en silencio — *y un guard de «trabajo en vuelo» convierte eso en una cola detenida* |
 
 ### Nivel 3 · Diseño y eficiencia
 
@@ -86,6 +87,7 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-21** | Subconsulta correlacionada en el `SELECT` que en realidad es un `EXISTS` |
 | **R-22** | Conversión implícita de tipo |
 | **R-27** | Orden de acceso consistente entre procedimientos — *deadlocks estructurales* |
+| **R-37** | Una reescritura equivalente puede costar 48 veces más: mídela, no la razones |
 
 ### Nivel 4 · Esquema e instancia
 
@@ -98,6 +100,7 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-33** | Reducir volumen no es optimizar — *mide quién lee la tabla antes de prometer rendimiento* |
 | **R-34** | Una consulta lenta con CPU casi nula no es lenta: está esperando — *y la CPU baja del servidor es el síntoma, no la salud* |
 | **R-35** | Una migración de versión mueve los datos, no la puesta a punto — *menos lecturas y más tiempo es la firma* |
+| **R-38** | Código ejecutable guardado como datos no existe para el motor — *y tu mapa de dependencias sale limpio y falso* |
 
 ---
 
@@ -155,6 +158,8 @@ copiando SQL a mano. Varias tienen tool dedicada:
 | Si la instancia está fechando algo o solo acumulando | `get_wait_stats` **dos veces** y restar; Query Store agregado por día laborable | R-28 |
 | FKs no confiables (en observación) | `check_referential_integrity` | registro |
 | Plan estimado (scan vs seek) | `explain_query` | R-01 |
+| Si la reescritura "limpia" cuesta más que el original | `execute_select_query` ejecutando **las dos formas aisladas y repetidas**; `explain_query` si hay permiso de `SHOWPLAN` | R-37 |
+| Lógica ejecutable escondida en columnas de texto | `execute_select_query` sobre `sys.columns` filtrando tipos `varchar/nvarchar(max)`, y `LIKE '%SELECT%'` sobre las candidatas | R-38 |
 | Todo lo demás | `execute_select_query` | — |
 
 > ⚠️ **Al usar `execute_select_query`, quita los comentarios.** Las consultas de detección de
