@@ -282,3 +282,106 @@ qué se puede diagnosticar a posteriori.
 cualquier posición), empezando por `SELECT`/`WITH`, y sin palabras vetadas ni siquiera en
 literales (`SHUTDOWN`, `WAITFOR`…). El mapeo completo regla→tool y el detalle del validador
 están en el skill `buenas-practicas-sql`.
+
+---
+
+## Auditoría de instancia — paso 0 y orden de medición
+
+Lo anterior sirve para un objeto. Cuando el encargo es **una instancia entera**, el orden
+importa, porque cada paso decide qué evidencia vale en el siguiente. Este es el itinerario que
+salió de dos auditorías de instancia consecutivas; lo que coincidió entre ambas es
+procedimiento, lo que no, circunstancia.
+
+### Paso 0 — Comprobar qué puede ver el login antes de fiarse de un cero
+
+Es la regla R-28 aplicada al propio proceso: **el vacío se lee como ausencia**. Antes de la
+primera medición, siempre:
+
+```sql
+SELECT permission_name FROM sys.fn_my_permissions(NULL, 'SERVER');
+SELECT SUM(CASE WHEN HAS_DBACCESS(name) = 1 THEN 1 ELSE 0 END) AS accesibles, COUNT(*) AS total
+FROM   sys.databases WHERE state_desc = 'ONLINE';
+```
+
+Tres trampas medidas, ninguna da error:
+
+| Síntoma | Causa real | Sustituto mientras llega el permiso |
+|---|---|---|
+| `sys.master_files` devuelve **0 filas**; `list_databases` reporta tamaño `NULL` | Falta `VIEW ANY DEFINITION` | `sys.dm_io_virtual_file_stats` (tamaño en disco, con `VIEW SERVER STATE`) |
+| `sys.databases` lista todas las bases pero las grandes dan error 916 | `VIEW ANY DATABASE` deja ver nombres, no entrar; falta usuario o `CONNECT ANY DATABASE` | Caché de planes (ámbito de servidor) para el código y el coste; nada para índices ni catálogo |
+| `sys.sql_modules.definition` es `NULL` en objetos no cifrados | Falta `VIEW DEFINITION` / `VIEW ANY DEFINITION` | Caché de planes y Query Store dan el texto de las sentencias |
+
+Lo que desbloquea cada permiso de servidor, para pedir lo justo: `VIEW ANY DEFINITION`
+(definiciones, `master_files`, catálogo de bases sin usuario) · `CONNECT ANY DATABASE` (entrar
+en todas sin crear usuario; no lee datos) · `ALTER TRACE` (cubre `SHOWPLAN` en todas las bases:
+`explain_query`) · `SELECT ALL USER SECURABLES` o `db_datareader` (datos; decisión aparte).
+Si el login no alcanza las bases que concentran la carga, el análisis puede empezar por lo que
+no lo necesita —jobs, caché de planes, configuración, esperas— pero **hay que pedir el acceso
+el primer día**, y dejar el script de permisos como paso 1 del itinerario del paquete.
+
+### Paso 1 — Procedencia: de dónde vienen las bases y qué trajeron dentro
+
+`RESTORE` inserta en `msdb.dbo.backupset` la cabecera del backup de origen, con `server_name` y
+`software_build_version`; `msdb.dbo.restorehistory` da la fecha. Con eso se sabe, sin acceso a
+producción, **qué instancia y qué versión es producción** y cuándo se refrescó cada base.
+
+Y lo decisivo: **Query Store viaja con la base.** Una copia restaurada trae la historia de
+consultas y planes de su origen hasta el momento del backup. Cada plan lleva `engine_version` y
+`compatibility_level`, así que la procedencia queda grabada plan a plan y sirve de comprobación
+cruzada del corte por fecha. Es telemetría real de producción legible en un entorno donde se
+puede medir sin riesgo — y es **perecedera**: `stale_query_threshold_days` (30 por defecto) y
+`max_storage_size_mb` la purgan. Rescatarla es el primer trabajo de la auditoría, no el último.
+
+### Paso 2 — Elegir la fuente de telemetría por el uptime
+
+| Uptime del servicio | Fuente principal | Complemento |
+|---|---|---|
+| Días | Query Store, separando la ventana de origen de la local | `get_wait_stats` con ventana viva; caché de planes solo para bases sin Query Store |
+| Semanas o más | Query Store si está activo; si no, caché de planes con la fecha de arranque anotada | `get_wait_stats` acumulado **y** con ventana |
+
+Con Query Store, "esto consumió CPU desde el reinicio" se convierte en "esto lleva semanas siendo
+el más caro y su plan cambió el día X", que es lo que sobrevive al viaje a producción.
+
+### Paso 3 — Orden de medición
+
+1. `get_configuration_health` — descarta o confirma la instancia en cinco minutos.
+2. `get_wait_stats` acumulado y `get_performance_triage` con ventana viva, **antes** de lanzar
+   ninguna extracción masiva: las extracciones contaminan la muestra.
+3. Query Store por base (CPU, duración, lecturas, ejecuciones por día) → por objeto → por
+   sentencia. Con el rescate ya en disco, todo lo demás se hace en local.
+4. Jobs: `msdb` entero — definiciones completas (`sysjobsteps.command` se trunca en pantalla),
+   schedules decodificados, historial con `run_duration` convertido desde `HHMMSS`, y el
+   mensaje de error de cada paso agrupado por causa. Diez jobs que fallan suelen ser dos causas.
+5. Catálogo: tablas (heaps), índices con uso, sugeridos, fragmentación `LIMITED`, estadísticas,
+   FK con y sin índice, triggers, y **el código de todos los módulos** a disco. Anotar los días
+   de evidencia de uso: con menos de 30, la lista de "sin uso" es para vigilar, no para borrar.
+6. Barrido estático del código por regla, cruzado con la CPU de Query Store por objeto. Salen
+   candidatos; hallazgo es solo lo que después se lee y se mide.
+
+### Paso 4 — Cuando el volumen supera al MCP
+
+`execute_select_query` está limitado en filas y devuelve el resultado al contexto. Para volcar el
+Query Store de decenas de bases o el código de miles de módulos, eso no sirve. Un extractor de
+solo lectura con las mismas credenciales del `.env` —el mismo login, los mismos permisos, solo
+`SELECT`— que escriba a la carpeta de la investigación es legítimo y reproducible: se guarda con
+el paquete, se dice en el README, y el MCP sigue siendo la vía para todo lo puntual.
+
+### Paso 5 — Trampas que se repiten
+
+- **Las opciones de base viajan con el restore.** `AUTO_UPDATE_STATISTICS_ASYNC`, RCSI,
+  `page_verify`, Change Tracking: lo que se mide en la copia es lo que tiene el origen. Los
+  hallazgos de instancia (memoria, MAXDOP, tempdb, archivos) no viajan; los de base, sí.
+- **Un mantenimiento "arreglado a medias".** Si el procedimiento de mantenimiento no existía en
+  la instancia y alguien creó una copia con otro nombre, buscar los jobs que siguen apuntando al
+  original, los que están habilitados sin schedule, y si la copia perdió el registro de lo que
+  hace.
+- **La semántica del destino.** Si se mide en un motor más nuevo que producción, cada hallazgo
+  de código se evalúa con la semántica del destino (`USE HINT` de compatibilidad en
+  `explain_query`), y los planes que se proponen forzar son los que producción ya ejecutó.
+
+### El informe de instancia
+
+La plantilla es la misma; cambian las secciones: **01** Perfil de la instancia · **02** El
+mecanismo · **03** Hallazgos · **04** El patrón, en concreto · **05** Lo que el análisis no pudo
+ver · **06** Configuración · **07** Plan de acción. Los hallazgos de configuración llevan prefijo
+`C-`, y los que solo aplican al entorno medido lo dicen en la ficha.

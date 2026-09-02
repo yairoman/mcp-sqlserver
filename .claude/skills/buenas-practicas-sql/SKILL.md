@@ -5,7 +5,7 @@ description: Base de conocimiento viva de buenas prácticas y anti-patrones de T
 
 # Buenas prácticas T-SQL — base de conocimiento
 
-**38 reglas en 4 niveles.** Ninguna es genérica de manual: cada una salió de un problema real
+**43 reglas en 4 niveles.** Ninguna es genérica de manual: cada una salió de un problema real
 medido en código productivo —o, en las marcadas `[gen]`, de un mecanismo conocido del motor
 que este entorno tiene todas las condiciones para sufrir— con su costo y su consulta de
 detección.
@@ -56,6 +56,7 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-06** | Predicados *catch-all*: un plan para todos los parámetros |
 | **R-29** | Un identificador sin validar en el `WHERE` de una escritura masiva — *bloqueo y pérdida de datos a la vez* |
 | **R-32** | Un predicado que no cubre el prefijo de ninguna clave — *y el paralelismo que lo esconde* |
+| **R-42** | Una poda que desactiva la integridad de toda la base para borrar en doce tablas — *lock de tabla por lote, escritores de otras bases parados diez minutos y todas las FK sin confianza* |
 
 ### Nivel 2 · Corrección — bugs silenciosos, sin síntoma
 
@@ -88,6 +89,7 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-22** | Conversión implícita de tipo |
 | **R-27** | Orden de acceso consistente entre procedimientos — *deadlocks estructurales* |
 | **R-37** | Una reescritura equivalente puede costar 48 veces más: mídela, no la razones |
+| **R-41** | Una verificación de equivalencia entre dos conjuntos vacíos pasa limpia — *y certifica lo que no probó* |
 
 ### Nivel 4 · Esquema e instancia
 
@@ -101,6 +103,9 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-34** | Una consulta lenta con CPU casi nula no es lenta: está esperando — *y la CPU baja del servidor es el síntoma, no la salud* |
 | **R-35** | Una migración de versión mueve los datos, no la puesta a punto — *menos lecturas y más tiempo es la firma* |
 | **R-38** | Código ejecutable guardado como datos no existe para el motor — *y tu mapa de dependencias sale limpio y falso* |
+| **R-39** | Un job que no cabe en su propio intervalo no falla: deja de ejecutarse — *cero fallos, y el proceso corriendo a un quinto de su ritmo* |
+| **R-40** | La recomendación de índice del motor es aritmética sobre las estadísticas que haya — *impacto 76,5 % sobre una columna que cubre el 97 % de la tabla* |
+| **R-43** | El mantenimiento de índices también es carga: un *rebuild* con *fallback* OFFLINE sobre una bitácora viva bloquea la aplicación — *2.521 s de INSERT esperando a la hora exacta del job* |
 
 ---
 
@@ -160,6 +165,13 @@ copiando SQL a mano. Varias tienen tool dedicada:
 | Plan estimado (scan vs seek) | `explain_query` | R-01 |
 | Si la reescritura "limpia" cuesta más que el original | `execute_select_query` ejecutando **las dos formas aisladas y repetidas**; `explain_query` si hay permiso de `SHOWPLAN` | R-37 |
 | Lógica ejecutable escondida en columnas de texto | `execute_select_query` sobre `sys.columns` filtrando tipos `varchar/nvarchar(max)`, y `LIKE '%SELECT%'` sobre las candidatas | R-38 |
+| Jobs cuya duración compite con su propio intervalo | `execute_select_query` sobre `msdb.dbo.sysjobhistory`, convirtiendo `run_duration` (formato `HHMMSS`, **no** segundos) | R-39 |
+| Si la recomendación de índice del motor se sostiene | `get_missing_indexes`, y luego `execute_select_query` con `GROUP BY` de la columna propuesta y `sys.dm_db_stats_properties` de la tabla | R-40 |
+| Si la prueba de equivalencia demuestra algo o compara dos vacíos | `execute_select_query` publicando el **conteo de cada lado** junto a los dos `EXCEPT` | R-41 |
+| Paralelismo mal ganado (CPU media ≫ duración media) | `get_query_stats`: el cociente aproxima el DOP efectivo | R-34, R-19 |
+| Configuración floja heredada por base (`PAGE_VERIFY`, `AUTO_SHRINK`, estadísticas automáticas) | `execute_select_query` sobre `sys.databases` — un barrido, sin entrar en ninguna base | R-25 |
+| Un colector externo martilleando la instancia | `get_wait_stats` (`MSQL_XP`, `PREEMPTIVE_OS_*`) y `sys.dm_exec_cached_plans` ordenado por `usecounts` | R-28 |
+| Si una UDF escalar puede plegarse en el plan | `execute_select_query` sobre `sys.sql_modules.is_inlineable` — el compat level **no** basta | R-14 |
 | Todo lo demás | `execute_select_query` | — |
 
 > ⚠️ **Al usar `execute_select_query`, quita los comentarios.** Las consultas de detección de
