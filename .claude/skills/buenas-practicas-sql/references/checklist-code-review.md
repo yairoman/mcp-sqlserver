@@ -76,8 +76,11 @@ Cada punto enlaza con su regla en [`reglas.md`](reglas.md).
 
 - [ ] El índice nuevo no está ya cubierto por el prefijo de otro existente · **R-23**
 - [ ] Se nombra por sus **columnas**, no por la persona o cliente solicitante · **R-23**
+- [ ] Antes de crear un índice **recomendado por el motor**: selectividad real de la columna, fecha de las estadísticas, y si el clustered ya lo cubre · **R-40**
 - [ ] Toda tabla con crecimiento sostenido tiene índice clustered · **R-24**
 - [ ] Toda tabla de bitácora nace con su política de retención · **R-24**
+- [ ] Una poda masiva no desactiva FK ni triggers de toda la base, borra en lotes por debajo del umbral de escalado (~5.000 locks), tiene índice por la columna del `WHERE` y reactiva las FK `WITH CHECK` · **R-42**
+- [ ] El job de mantenimiento de índices no tiene *fallback* OFFLINE sobre tablas con escritura continua, y su ventana no coincide con la de la aplicación ni con la de backups · **R-43**
 - [ ] Antes de concluir «no hubo deadlocks», se midió la ventana real de la fuente · **R-28**
 - [ ] La captura que importa tiene sesión dedicada y `STARTUP_STATE = ON`, no comparte buzón · **R-28**
 - [ ] Lo que un job de diagnóstico encuentra se persiste en algún sitio · **R-28**
@@ -88,6 +91,7 @@ Cada punto enlaza con su regla en [`reglas.md`](reglas.md).
 ## Antes de entregar una reescritura
 
 - [ ] Se demostró que **no cambia el resultado**: `EXCEPT` en las dos direcciones · **R-37**
+- [ ] La prueba de equivalencia publica el **conteo de cada lado**: dos conjuntos vacíos dan cero diferencias y no prueban nada · **R-41**
 - [ ] Se demostró que **no cuesta más**: las dos formas ejecutadas aisladas y repetidas, con su duración anotada · **R-37**
 - [ ] Todo cambio descartado se documenta **con su cifra**, para que el siguiente no lo reintente · **R-37**
 

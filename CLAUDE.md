@@ -5,7 +5,7 @@
 Este repositorio tiene dos caras, y conviene no confundirlas:
 
 1. **El servidor MCP** (`src/`) — la herramienta que expone SQL Server a un LLM.
-   Setup, variables de entorno y catálogo de las 29 tools: ver [`README.md`](README.md).
+   Setup, variables de entorno y catálogo de las 33 tools: ver [`README.md`](README.md).
 
 2. **El espacio de trabajo de auditoría** (`docs/`) — uno de los objetivos centrales del
    proyecto es **usar** ese servidor para revisar el rendimiento de instancias SQL Server:

@@ -9,6 +9,212 @@ señal de que son estilo del equipo y no descuidos.
 
 ---
 
+## v17 — 2026-09-02 · 2.084 horas de CPU al mes leídas desde una copia
+
+**Origen:** auditoría de una instancia de desarrollo de 56 bases refrescada desde producción.
+El *restore* trajo dentro de cada base cuatro semanas de Query Store de producción —los planes
+llevan grabados `engine_version` y `compatibility_level` del origen—, así que las cifras de coste
+son de producción aunque se midieran en un entorno de pruebas: **17.907 millones de ejecuciones y
+2.084 h de CPU en 28 días**, el 83 % en tres bases. La instancia estaba bien configurada y una
+ventana viva de 60 s daba esperas al 11,7 % del tiempo de core: el coste era del código, no del
+servidor. Además de Query Store se volcó el catálogo entero (8.131 tablas, 8.308 índices, 17.132
+módulos, 3,13 millones de líneas) para cruzar el barrido estático con la CPU real por objeto.
+
+**Dos reglas nuevas y cinco reforzadas.** El proceso de auditoría de instancia —paso 0 de
+permisos, procedencia por `backupset`, rescate del Query Store antes de que se purgue, orden de
+medición— se añadió al skill `analisis-bd`, que es donde vive el proceso.
+
+**Reglas nuevas:**
+
+| Regla | Por qué se añadió |
+|---|---|
+| **R-42** Una poda que desactiva la integridad de toda la base para borrar en doce tablas | Dos jobs manuales de poda abrían con `sp_MSforeachtable 'ALTER TABLE ? NOCHECK CONSTRAINT ALL'` y `DISABLE TRIGGER ALL` sobre las **1.780 tablas** de la base, borraban en bucle con `DELETE TOP (50000)` —diez veces el umbral de escalado a lock de tabla— durante **8 h 58 m**, y cerraban con `WITH NOCHECK CHECK CONSTRAINT ALL`. Resultado medido: escrituras de **otras dos bases** sobre la podada esperaron **565 y 598 s** (una sesión murió esperando), y al terminar **1.040 FK** quedaron `is_not_trusted = 1`. La tabla más grande se podaba por una columna de fecha **sin índice**: cada lote escaneaba 2 GB con lock de tabla. R-04 y R-29 cubrían la transacción larga y el `WHERE` sin validar; ninguna cubría que el guion de poda desactive la integridad de toda la base ni que el tamaño del lote decida el ámbito del lock |
+| **R-43** El mantenimiento de índices también es carga: un *rebuild* con *fallback* OFFLINE sobre una bitácora viva bloquea la aplicación | El job de mantenimiento de una base usaba `'INDEX_REBUILD_ONLINE,INDEX_REBUILD_OFFLINE'`, que en el *framework* habitual significa «el primero que se pueda, y si no, el siguiente». Sobre una bitácora de 18,7 M filas con `INSERT` continuo desde la aplicación, el *rebuild* cayó a OFFLINE y los `INSERT` esperaron **2.521 s** a la hora exacta del job (lunes 21:00), dentro de una base que acumuló 5.184 s de esperas de lock en 48 h. El job coincidía además con la ventana de backups. En Standard Edition no existe ONLINE: allí el *fallback* no es una excepción, es el único camino, y la única salida es excluir las bitácoras del *rebuild* y mover la ventana |
+
+**Reglas reforzadas:**
+
+- **R-01** (función sobre columna): sub-caso con **trampa de equivalencia**. Reescribir
+  `dateadd(YY, -1, col) < @d` como `col < DATEADD(YEAR, 1, @d)` es sargable y equivalente
+  **salvo el 29 de febrero**: `DATEADD(YEAR, -1, '29-feb')` devuelve 28-feb y la desigualdad puede
+  diferir para filas de ese día. La prueba de equivalencia debe ejecutarse con `@d` = hoy **y** con
+  `@d` = 29 de febrero del último bisiesto, y la diferencia, si existe, es decisión de negocio, no
+  del parche. Medido en un procedimiento de 28 ejecuciones y 3 h cada una, 86 h de CPU al mes.
+- **R-02** (fila a fila): dos formas medidas que no estaban. (1) Una **función escalar en el
+  `WHERE`** se ejecuta por cada fila candidata, no por cada ejecución: **5.823 millones** de
+  llamadas en un mes desde 12.329 ejecuciones de un procedimiento que devolvía **3 filas**; 25 h
+  de CPU la función y 81 h el llamador, con 40.500 millones de lecturas. La función devolvía 0 si y
+  solo si no existía fila con dos tipos concretos: eso es un `NOT EXISTS` con `IN (a, b)`, un
+  *anti-join* una vez por sentencia. (2) Un `WHILE` que hace `INSERT INTO #t EXEC otra_base.dbo.proc`
+  por cada elemento: **148,9 millones** de llamadas al mes, 59 h. La suma de llamadas baratas es
+  el coste; la detección es `count_executions` de la sentencia interior en Query Store, no la del
+  procedimiento.
+- **R-03** (triggers set-based): el molde que la regla describe apareció **51 veces** en tres
+  bases, con una variante engañosa: el trigger **sí calcula** `@Count = COUNT(*) FROM inserted`,
+  pero solo para decidir si la acción es I/U/D, y después hace `SELECT @id = col FROM deleted` y
+  escribe una fila en una tabla de auditoría de otra base. Con N filas, la auditoría guarda una y
+  pierde N−1, sin error. Ver `@Count` en un trigger no significa que esté protegido: hay que ver
+  si se usa como guarda.
+- **R-24** (heaps y bitácoras): el caso más caro no era una bitácora sino una tabla de 680.444
+  filas y 51 MB **sin ningún índice**, borrada por dos columnas **8.939.526 veces al mes** a 36 ms
+  cada una: **91 h de CPU** en escanear 51 MB. Sus tablas hermanas estaban agrupadas por esas dos
+  columnas; una de ellas tenía **17 índices**. Y la magnitud en una instancia entera: **2.204 heaps,
+  346 GB**, incluidos una bitácora de 50 GB (44,7 de LOB), una tabla de 76,7 M de filas al 67 %
+  de fragmentación con la PK como índice no agrupado, y un histórico de 74,9 M de filas leído por
+  el procedimiento de 3 h por ejecución.
+- **R-39** (jobs): tres trampas hermanas de la que trae la regla. (1) **Cero fallos porque nunca
+  corre**: cuatro jobs de mantenimiento habilitados **sin schedule**; la base más afectada tenía un
+  índice al 99,4 % de fragmentación. (2) **88 fallos con una sola causa**: los jobs se clonaron de
+  producción y el procedimiento que invocan no existía en la instancia; alguien creó una copia con
+  otro nombre y reapuntó 18 de 23, y los 5 restantes siguieron fallando al 100 % durante semanas.
+  La copia, además, perdió el registro de lo que ejecuta. (3) Agrupar los fallos por
+  `job + paso + mensaje` convierte una lista de 108 fallos en cuatro causas en una consulta.
+
+## v16 — 2026-09-01 · 194 mil millones de lecturas por un `OR` de once caracteres
+
+**Origen:** análisis de un procedimiento de asignación disparado por un job cada 5 minutos, a
+partir de una sesión observada con 278.881.161 lecturas lógicas y 14:54 transcurridos. La primera
+medición descartó el diagnóstico intuitivo: **CPU al 95 % del tiempo transcurrido** — no estaba
+bloqueada, estaba trabajando. El procedimiento observado resultó ser barato (2.278 lecturas por
+ejecución); todo el coste estaba dos niveles por debajo, en una sola sentencia de un módulo
+anidado de 3.777 líneas que acumulaba **194.529.462.857 lecturas lógicas en 32 días para devolver
+14,3 filas de media**.
+
+**Dos reglas nuevas y tres reforzadas.**
+
+**Reglas nuevas:**
+
+| Regla | Por qué se añadió |
+|---|---|
+| **R-40** La recomendación de índice del motor es aritmética sobre las estadísticas que haya | La sugerencia con el *score* más alto de toda una base —impacto **76,5 %**— proponía indexar una columna bandera cuyo predicado selecciona el **96,8 %** de la tabla (934.367 de 964.966 filas). Las estadísticas que sostenían el cálculo tenían **ocho meses y medio** y muestreo del 6,8 %. La segunda sugerencia, con impacto **99,71 %**, pedía un índice sobre una columna que ya es la segunda del clustered. R-23 advertía que la DMV «sugiere columnas, no índices», pero no que su **cifra de impacto** hay que validarla contra la selectividad real antes de creerla |
+| **R-41** Una verificación de equivalencia entre dos conjuntos vacíos pasa limpia | La primera pasada de la prueba de equivalencia dio `EXCEPT` cero en ambas direcciones **y cero filas en los dos lados**: habría pasado por buena. El lote se había tomado ordenando por clave ascendente, es decir las filas más antiguas, y un predicado de vigencia presente en ambas formas las descartaba todas. Aporta las dos mitades del arreglo: publicar el **conteo de cada lado** junto a las diferencias y tratar `filas = 0` como fallo, y **diseñar el lote** para que ejercite duplicados, valores fuera de rango y no-coincidencias — que es lo único que distingue un `LEFT JOIN + IS NOT NULL` de un `INNER JOIN` |
+
+**Reglas reforzadas:**
+
+- **R-06** (catch-all): sub-caso con **una forma distinta de las tres que traía la regla**. El
+  `OR` no compara un parámetro con una columna: decide **si una tabla filtro participa**
+  (`@lista = '' OR f.id IS NOT NULL` sobre un `LEFT JOIN`). El daño tampoco es el habitual —no es
+  un plan mal *sniffed*, es que el filtro pequeño que ya está en la mano **no puede ser el lado
+  conductor**, así que el plan arranca por el universo entero y descarta al final. Medido aislado,
+  misma salida de 6 filas: **870.943 → 39** lecturas en una sentencia y **4.117.255 → 36** en la
+  otra, factores de 22.332× y 114.368×. El reparto remata el caso: el **97 %** de las llamadas
+  pasaba filtro concreto, es decir pagaba el plan del 3 %. Y dos señales de detección baratas: un
+  `LEFT JOIN` con `IS NOT NULL` sobre esa misma tabla en el `WHERE`, y una consulta que acumula
+  recompilaciones sin mejorar —13.907 compilaciones, dos planes cacheados y **los dos malos**, así
+  que no había plan bueno que forzar.
+
+- **R-02** (procedimiento en bucle fila por fila): sub-caso que **cambia la prioridad del
+  arreglo**. Con Always On en `SYNCHRONOUS_COMMIT`, cada sentencia suelta del bucle es su propia
+  transacción implícita y paga una espera de red. Medido: `HADR_SYNC_COMMIT` al **5,07 %** de todas
+  las esperas de la instancia —1.455.868 tareas, 10.396.021 ms, **7,1 ms por commit**. Agrupar las
+  escrituras del bucle quita CPU y latencia a la vez, sin tocar lógica de negocio: suele ser el
+  cambio más fácil de justificar de todo el rediseño.
+
+- **R-28** (auditar la instrumentación): dos trampas de lectura que dan cifras falsas sin error, y
+  ambas se cometieron y corrigieron en esta misma investigación.
+  `sys.dm_exec_procedure_stats` **incluye el costo de los módulos anidados**, así que sumar
+  envoltorio e hijos duplica —se comprobó: 5.308.821.231 del padre contra 4.931.557.556 +
+  377.093.875 de los hijos, exactamente lo mismo—, y la pista que lo delata es que comparten
+  `execution_count` y `last_execution_time`. Y `EstimateRows` de un operador de scan **no es la
+  cardinalidad de la tabla** sino la salida estimada tras los predicados: 284.863 estimadas sobre
+  una tabla de 964.966, y 62.853 sobre otra de 628.533. Para volumen real,
+  `sys.dm_db_partition_stats`.
+
+- **R-23** (un índice de más también cuesta): sub-caso con **un coste que la regla no
+  contemplaba**. Un índice muerto no solo cuesta escrituras: el optimizador usa cualquier
+  estadística que cubra una columna para estimar cardinalidad, **la use o no el plan final**. Así
+  que el histograma vencido de un índice con 37 seeks puede ser la fuente de la estimación de un
+  predicado en consultas que ni lo tocan. Medido: 2 pasos de histograma sobre el 6,7 % de las filas,
+  258 días sin actualizar. Es un argumento más para retirarlo, y uno contra crear índices «por si
+  acaso»: cada uno añade una estadística que mantener y una fuente más de estimaciones malas.
+
+**Lección de método, no de T-SQL:** tres de los hallazgos que este análisis publicó primero
+resultaron equivocados al obtener acceso completo a las bases, y hubo que retirarlos —dos
+recomendaciones de índice y un conjunto de cardinalidades leídas del plan. El patrón común es que
+las tres eran **cifras derivadas** (un *score* de la DMV, un `EstimateRows`) tratadas como
+mediciones. La regla que queda es la que ya estaba en `SKILL.md` y ahora tiene tres casos:
+si no lo contaste, dilo como estimación.
+
+---
+
+## v15 — 2026-08-31 · Un servidor sin presión y con una sola sentencia leyendo 16 TB
+
+**Origen:** revisión general de rendimiento de una instancia, sin incidente asociado. La
+respuesta corta fue que la configuración estaba bien —`MAXDOP` y `cost threshold` ya ajustados,
+memoria topada al 82 %, tempdb con 8 archivos iguales— y que todo el coste estaba en el código y
+en un job. Las tres mediciones que descartaron el diagnóstico intuitivo: espera de señal al
+**0,21 %**, concesiones de memoria pendientes en **0**, y **0** sesiones bloqueadas en la ventana
+medida.
+
+**Una regla nueva y cinco reforzadas.**
+
+**Regla nueva:**
+
+| Regla | Por qué se añadió |
+|---|---|
+| **R-39** Un job que no cabe en su propio intervalo no falla: deja de ejecutarse | Un job programado cada 5 min con duración máxima de **1.568 s** (26 min) y **0 fallos**. El Agent descarta los arranques solapados sin registrar nada: el proceso corre a un quinto de su ritmo y todos los paneles lo dan por verde. Aporta además dos cosas que no estaban en el catálogo: que la **media miente** —16 de 20 ejecuciones en 0–13 s y 4 en 1.100–1.314 s, un reparto bimodal que hay que separar entre *parameter sniffing* y volumen real antes de tocar nada— y la trampa aritmética de `run_duration`, que es `HHMMSS` y no segundos, así que un `AVG` sobre él no significa nada |
+
+**Reglas reforzadas:**
+
+- **R-19** (table variables): sub-caso que **corrige el alcance de la regla**. Estaba escrita
+  alrededor de «en compat < 150 no hay *deferred compilation*», lo que se lee como que 150+ lo
+  resuelve. No lo resuelve: la compilación diferida estima **una sola vez**, sin estadísticas y
+  sin recompilar por cambio de volumen. Medido a **compat 160**: un `INSERT INTO @tabla` con
+  **8.366.040** lecturas medias (≈ 64 GB por ejecución) y 4.519.397 ms de CPU en 17 ejecuciones —
+  la sentencia más cara de la instancia. La nota operativa: al estimar la ganancia de subir el
+  compat level, no cuentes las table variables como resueltas.
+
+- **R-34** (duración ≫ CPU es espera): sub-caso nuevo con **la firma inversa**, que la regla no
+  cubría. `CPU media > duración media` solo puede significar varios hilos, y el cociente aproxima
+  el DOP efectivo. Dos sentencias de la misma instancia dieron **2,6×** las dos: un `INSERT` en
+  table variable y un `IF EXISTS` que gastaba 2.829 ms de CPU por ejecución. El paralelismo
+  encabezaba el ranking de esperas (`CXCONSUMER` al 27,67 %) y era el efecto, no la causa —
+  estimación de cardinalidad equivocada. Subir `cost threshold` los habría sacado del informe sin
+  arreglar nada.
+
+- **R-14** (funciones escalares): **tercera reproducción** del sub-caso de la UDF que aparece dos
+  veces en el plan cache, con cifras casi idénticas a la segunda —**69.205** ejecuciones del
+  cuerpo en **173 segundos** frente a **1** de la consulta padre, y 144 M de lecturas contra
+  147 M. Lo que aporta de nuevo, y contradice una lectura razonable de la regla anterior: la base
+  estaba a **compat 160** y el inlining **no se aplicó**. Se añade la comprobación que lo zanja
+  (`sys.sql_modules.is_inlineable`) y los dos descalificadores presentes en el caso: función
+  declarada en otra base y cuerpo `SELECT TOP 1 @variable = …`.
+
+- **R-25** (configuración por defecto): sub-caso nuevo, **la configuración por base**. La regla
+  nació mirando `sp_configure`, que son diez valores en un sitio; el barrido de una instancia de
+  52 bases encontró **10 sin `CHECKSUM`** (una de ellas en `NONE`), 1 con estadísticas
+  automáticas apagadas, 1 con `AUTO_SHRINK` —en una base de bitácora— y 5 por debajo del compat
+  del motor, 4 de ellas sin Query Store. Dos detalles que lo hacen regla y no anécdota: las bases
+  afectadas **no eran las dormidas** —dos encabezaban el consumo—, y la herramienta de auditoría
+  de configuración **abortó con error 916** en la primera base sin acceso devolviendo cero
+  hallazgos, mientras el barrido por `sys.databases` lo encontró completo. Se añade además la
+  advertencia de que `PAGE_VERIFY CHECKSUM` solo protege lo que se escriba a partir de ese
+  momento: prometer que el `ALTER` cierra el riesgo es falso.
+
+- **R-28** (la instrumentación se audita): segunda reproducción del sub-caso «el instrumento *es*
+  el consumo», por una vía distinta y por eso vale la pena. Aquí el colector no salió en el
+  ranking de CPU sino en el de **esperas**: `MSQL_XP` era la segunda de la instancia, **6 h 50
+  min** sobre 69 h de uptime. Ninguna consulta de negocio lo explicaba, y el rastro no estaba en
+  `dm_exec_query_stats` sino en los `usecounts` del plan cache. Se añade la heurística —`MSQL_XP`
+  y `PREEMPTIVE_OS_*` sin dueño apuntan a un agente externo— y la consulta que lo identifica.
+
+**Revisado y sin cambios:** R-09 (`NOLOCK` sistemático en las cuatro bases principales, incluido
+el interior de la UDF — la regla ya lo cubre y aquí quedó marcado como decisión funcional, no
+como defecto a corregir), R-32 (el `IF EXISTS` sin índice de apoyo es el caso de manual), R-23
+(no se pudo aplicar: sin acceso a las bases no hay forma de ver índices redundantes) y R-06.
+
+**No promovido por no estar verificado:** la causa concreta de la bimodalidad del job de R-39.
+Distinguir *parameter sniffing* de volumen real exigía instrumentar el número de filas por
+ejecución, y la sesión fue de solo lectura. Queda anotado en el informe como el primer paso del
+arreglo, no como hallazgo.
+
+**Límite de la investigación, que condiciona todo lo anterior:** el login solo accedía a **26 de
+52 bases**, y a ninguna de las que encabezaban el consumo. Las DMV de ámbito de servidor sí
+respondían, así que se midió el *qué* pero no el *dónde*: sin definición de objetos, sin índices
+existentes y sin volúmenes de tabla. Por eso los índices candidatos se entregaron **comentados**,
+tras una comprobación previa obligatoria, en vez de como script aplicable.
+
+---
+
 ## v14 — 2026-08-17 · El `DELETE` de la alerta no era el que bloqueaba
 
 **Origen:** dos alertas de bloqueo en producción el mismo día, ambas con el mismo par: un paso de

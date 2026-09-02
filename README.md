@@ -2,15 +2,34 @@
 
 **MCP Server para SQL Server** — Permite a cualquier LLM (Claude, Copilot, Cursor, etc.) conectarse a SQL Server para inspeccionar esquemas, leer datos, ejecutar queries, analizar performance y validar integridad de información.
 
+## 📋 Requisitos
+
+- **Node.js >= 20** — verifica con `node -v`
+- Acceso de red a una instancia de SQL Server y credenciales de un usuario SQL
+
 ## 🚀 Quick Start
 
-### 1. Instalar dependencias
+### 1. Clonar el repositorio
+
+```bash
+git clone <url-del-repositorio> mcp-sqlserver
+cd mcp-sqlserver
+```
+
+### 2. Instalar dependencias
 
 ```bash
 npm install
 ```
 
-### 2. Configurar variables de entorno
+> **⚠️ Este paso no es opcional en ninguna ruta de instalación**, ni siquiera si vas a usar la
+> variante sin compilar (`npx tsx src/index.ts`). `npx` resuelve `tsx` desde su caché global, así
+> que el comando *parece* autosuficiente, pero las dependencias del proyecto — `dotenv`, `mssql`,
+> `@modelcontextprotocol/sdk`, `zod` — tienen que estar en `node_modules/`. Sin ellas el proceso
+> muere al arrancar con `ERR_MODULE_NOT_FOUND` y el cliente MCP solo reporta `Connection closed`,
+> sin más pistas. Ver [Troubleshooting](#-troubleshooting).
+
+### 3. Configurar variables de entorno
 
 Copia el archivo de ejemplo y edítalo con tus credenciales:
 
@@ -29,8 +48,8 @@ MSSQL_PASSWORD=tu-password      # Contraseña
 MSSQL_DATABASE=master           # Base de datos inicial
 
 # Seguridad
-MSSQL_ENCRYPT=false             # true si usas SSL/TLS, false para conexiones locales
-MSSQL_TRUST_SERVER_CERTIFICATE=false  # true para aceptar certificados auto-firmados
+MSSQL_ENCRYPT=true              # true si usas SSL/TLS, false para conexiones locales
+MSSQL_TRUST_SERVER_CERTIFICATE=true   # true para aceptar certificados auto-firmados
 MSSQL_READ_ONLY=true            # true = solo SELECT, false = permite INSERT/UPDATE/DELETE
 
 # Límites
@@ -43,13 +62,52 @@ MSSQL_POOL_MIN=1
 MSSQL_POOL_MAX=10
 ```
 
-> **💡 Nota**: El servidor carga el archivo `.env` automáticamente usando `dotenv`. Si también configuras variables de entorno en tu cliente MCP (Claude, Codex, etc.), las del cliente tienen **prioridad** sobre el `.env`.
+> **💡 Nota**: El servidor carga el `.env` automáticamente usando `dotenv`, y lo busca **junto al
+> repositorio, no en el directorio de trabajo**: la ruta se resuelve desde la ubicación del propio
+> archivo (`src/index.ts` o `dist/index.js`), así que funciona sea cual sea el `cwd` desde el que
+> lo lance el cliente. Si además defines variables de entorno en la configuración de tu cliente MCP
+> (Claude, Codex, etc.), las del cliente tienen **prioridad** sobre el `.env`.
 
-### 3. Compilar
+### 4. Compilar
 
 ```bash
 npm run build
 ```
+
+Esto genera `dist/index.js`, que es lo que apuntan la mayoría de las configuraciones de cliente de
+abajo. **Puedes saltarte este paso** si prefieres ejecutar directamente el TypeScript: usa `npx`
+como comando y `tsx /ruta/a/mcp-sqlserver/src/index.ts` como argumentos en cualquiera de los
+clientes. Es la variante que usa el `.mcp.json` incluido en el repo.
+
+### Configurar en Claude Code
+
+**El repositorio ya incluye un `.mcp.json` en la raíz**, así que no hace falta configurar nada:
+basta con abrir la carpeta del proyecto con Claude Code y aceptar el servidor cuando lo proponga.
+La configuración incluida es:
+
+```json
+{
+  "mcpServers": {
+    "mcp-sqlserver": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["tsx", "src/index.ts"],
+      "env": {}
+    }
+  }
+}
+```
+
+Usa `tsx` sobre el TypeScript, de modo que **no requiere `npm run build`** — pero sí `npm install`.
+El bloque `env` está vacío a propósito: las credenciales se leen del `.env`, que no se versiona.
+
+Para usar el servidor desde **otro** proyecto, regístralo apuntando a la ruta absoluta:
+
+```bash
+claude mcp add mcp-sqlserver --scope user -- npx tsx /ruta/completa/a/mcp-sqlserver/src/index.ts
+```
+
+Comprueba el estado en cualquier momento con el comando `/mcp` dentro de Claude Code.
 
 ### Configurar en Claude Desktop
 
@@ -157,7 +215,10 @@ En Codex, ve a **Configuración > MCP > Conectar con un MCP personalizado** y ll
 
 Finalmente, clic en **Guardar**.
 
-> **Alternativa sin compilar**: Puedes usar `npx` como comando y `tsx /ruta/a/mcp-sqlserver/src/index.ts` como argumento para ejecutar directamente desde TypeScript.
+> **Alternativa sin compilar — aplica a todos los clientes de esta sección, no solo a Codex.**
+> Usa `npx` como comando y `tsx` + `/ruta/a/mcp-sqlserver/src/index.ts` como argumentos para
+> ejecutar directamente desde TypeScript, sin `npm run build`. Es lo que hace el `.mcp.json` del
+> repo. `npm install` sigue siendo obligatorio.
 
 ---
 
@@ -314,24 +375,100 @@ Finalmente, clic en **Guardar**.
 
 ```bash
 docker build -t mcp-sqlserver .
-docker run --rm \
+docker run --rm -i \
   -e MSSQL_HOST=host.docker.internal \
   -e MSSQL_USER=sa \
   -e MSSQL_PASSWORD=yourpassword \
   mcp-sqlserver
 ```
 
+> **El flag `-i` es obligatorio.** El servidor habla MCP por STDIO: sin stdin abierto lee EOF y se
+> cierra inmediatamente. La imagen no incluye el `.env` (no se copia al contexto de build), así que
+> las credenciales se pasan siempre con `-e`.
+
+### Entorno completo de pruebas
+
+Si no tienes un SQL Server a mano, el `docker-compose.yml` levanta uno de desarrollo
+(SQL Server 2022 Developer, con healthcheck) y el servidor MCP ya conectado contra él:
+
+```bash
+docker compose up --build
+```
+
+Las credenciales del entorno de pruebas están en el propio compose. El servicio `mcp-server`
+declara `stdin_open: true` por la misma razón que el `-i` de arriba.
+
+---
+
+## 🔧 Troubleshooting
+
+**El cliente MCP dice `Connection closed` / `CONNECTION_CLOSED` y nada más.**
+
+Ningún cliente MCP muestra el stderr del servidor: si el proceso muere antes del handshake, todo
+lo que verás es que la conexión se cerró. Para ver el error real, lanza a mano el mismo comando que
+tiene configurado el cliente:
+
+```bash
+npx tsx src/index.ts      # si usas la variante sin compilar
+node dist/index.js        # si compilaste con npm run build
+```
+
+Un arranque correcto imprime por stderr el host, la base, los flags y la ruta del `.env`, y termina
+con `✅ MCP Server connected and ready`. Las causas habituales:
+
+| Síntoma al ejecutarlo a mano                           | Causa                                                                   |
+| ------------------------------------------------------ | ----------------------------------------------------------------------- |
+| `ERR_MODULE_NOT_FOUND: Cannot find package 'dotenv'`   | Falta `node_modules/` → `npm install`                                    |
+| `Cannot find module '.../dist/index.js'`               | No se compiló → `npm run build`, o cambia la config a la variante `tsx`  |
+| `Configuration validation failed: host is required`    | El `.env` no se está encontrando, o falta la variable                    |
+| Arranca bien pero las tools fallan al consultar        | El servidor arranca sin conectar (el pool es diferido): revisa red, credenciales y firewall del puerto 1433 |
+
+Tras corregirlo hay que **reiniciar el cliente MCP** para que vuelva a lanzar el proceso.
+
+**Comprobar el handshake completo** sin depender de ningún cliente:
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  | npx tsx src/index.ts 2>/dev/null
+```
+
+Debe devolver el `serverInfo` y el catálogo de tools en JSON.
+
+**Una query válida es rechazada con "Only SELECT and WITH (CTE) queries are allowed".**
+El validador de `src/utils/sql-sanitizer.ts` rechaza cualquier consulta que contenga `--`, `/*` o
+`*/` **en cualquier posición**, y ciertas palabras vetadas (`SHUTDOWN`, `WAITFOR DELAY`,
+`OPENROWSET`, `BULK INSERT`, `xp_cmdshell`) incluso dentro de literales de cadena. Escribe las
+consultas sin comentarios.
+
 ---
 
 ## 🏗️ Desarrollo
 
 ```bash
-npm install       # Instalar dependencias
-npm run build     # Compilar TypeScript
-npm run dev       # Desarrollo con hot reload
-npm run lint      # Verificar tipos
-npm test          # Ejecutar tests
+npm install              # Instalar dependencias
+npm run build            # Compilar TypeScript (tsup)
+npm run dev              # Desarrollo con hot reload (tsx watch)
+npm run lint             # Verificar tipos (tsc --noEmit)
+npm test                 # Ejecutar tests (vitest)
+npm run validate:skills  # Consistencia de .claude/skills/
 ```
+
+> **Nota**: el proyecto todavía no tiene archivos de test, así que `npm test` termina con
+> `No test files found` y código de salida 1. Es lo esperado hoy, no un fallo de instalación.
+
+Para lanzar una consulta suelta contra el servidor sin pasar por el MCP, `run-query.mjs` en la raíz
+reutiliza el mismo `.env`:
+
+```bash
+node run-query.mjs "SELECT @@VERSION"
+```
+
+Sin argumento lista las tablas base de la base configurada. Ojo: `run-query.mjs` ejecuta la
+consulta **sin pasar por el validador** de `sql-sanitizer.ts` — es una utilidad de desarrollo, no
+una vía de acceso equivalente a las tools.
 
 ## 📄 Licencia
 
