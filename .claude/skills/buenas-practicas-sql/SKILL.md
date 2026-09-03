@@ -56,7 +56,7 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-06** | Predicados *catch-all*: un plan para todos los parámetros |
 | **R-29** | Un identificador sin validar en el `WHERE` de una escritura masiva — *bloqueo y pérdida de datos a la vez* |
 | **R-32** | Un predicado que no cubre el prefijo de ninguna clave — *y el paralelismo que lo esconde* |
-| **R-42** | Una poda que desactiva la integridad de toda la base para borrar en doce tablas — *lock de tabla por lote, escritores de otras bases parados diez minutos y todas las FK sin confianza* |
+| **R-42** | Una poda que desactiva la integridad de toda la base para borrar en unas pocas tablas — *lock de tabla por lote, escritores de otras bases parados durante minutos y todas las FK sin confianza* |
 
 ### Nivel 2 · Corrección — bugs silenciosos, sin síntoma
 
@@ -88,7 +88,7 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-21** | Subconsulta correlacionada en el `SELECT` que en realidad es un `EXISTS` |
 | **R-22** | Conversión implícita de tipo |
 | **R-27** | Orden de acceso consistente entre procedimientos — *deadlocks estructurales* |
-| **R-37** | Una reescritura equivalente puede costar 48 veces más: mídela, no la razones |
+| **R-37** | Una reescritura equivalente puede costar decenas de veces más: mídela, no la razones |
 | **R-41** | Una verificación de equivalencia entre dos conjuntos vacíos pasa limpia — *y certifica lo que no probó* |
 
 ### Nivel 4 · Esquema e instancia
@@ -104,8 +104,8 @@ FROM sys.databases WHERE name = DB_NAME();
 | **R-35** | Una migración de versión mueve los datos, no la puesta a punto — *menos lecturas y más tiempo es la firma* |
 | **R-38** | Código ejecutable guardado como datos no existe para el motor — *y tu mapa de dependencias sale limpio y falso* |
 | **R-39** | Un job que no cabe en su propio intervalo no falla: deja de ejecutarse — *cero fallos, y el proceso corriendo a un quinto de su ritmo* |
-| **R-40** | La recomendación de índice del motor es aritmética sobre las estadísticas que haya — *impacto 76,5 % sobre una columna que cubre el 97 % de la tabla* |
-| **R-43** | El mantenimiento de índices también es carga: un *rebuild* con *fallback* OFFLINE sobre una bitácora viva bloquea la aplicación — *2.521 s de INSERT esperando a la hora exacta del job* |
+| **R-40** | La recomendación de índice del motor es aritmética sobre las estadísticas que haya — *un impacto altísimo sobre una columna que cubre casi toda la tabla* |
+| **R-43** | El mantenimiento de índices también es carga: un *rebuild* con *fallback* OFFLINE sobre una bitácora viva bloquea la aplicación — *INSERT esperando decenas de minutos a la hora exacta del job* |
 
 ---
 
@@ -257,8 +257,11 @@ Este skill **se versiona y puede salir de la organización**. El código auditad
 
 **Sí se conserva** — es lo que da valor y no identifica a nadie:
 
-- Magnitudes: filas, GB, número de índices, porcentaje de esperas, duraciones. Son las que
-  justifican la severidad.
+- El orden de magnitud, en palabras: «millones de filas», «decenas de segundos», «la mayoría
+  de las llamadas». Es lo que justifica la severidad. Las cifras exactas (filas, GB, ms, %,
+  conteos de objetos) no: una cifra exacta y una descripción operativa juntas identifican al
+  cliente. Solo se conservan los números que son hechos del motor: errores, límites, valores
+  por defecto, versiones y niveles de compatibilidad.
 - Versión y edición del motor, compat level, configuración de la instancia.
 - La forma del anti-patrón y el fragmento de código, **reescrito con nombres genéricos**
   (`dbo.Tabla`, `@lista`, `#Resultado`, `col1`).
@@ -268,3 +271,10 @@ Este skill **se versiona y puede salir de la organización**. El código auditad
 Los informes con nombres reales viven en `docs/`, que está en `.gitignore` justamente por esto.
 Si necesitas trazar una regla hasta su caso concreto, esa correspondencia se queda ahí — nunca
 aquí.
+
+**El registro (`references/registro.md`) describe el patrón, no el caso.** Cada entrada dice qué
+regla nació o se reforzó y por qué mecanismo, con la forma del anti-patrón. **Sin cifras medidas
+ni descripción del entorno**: ni número de bases, filas, ejecuciones o duraciones, ni el rol de
+la instancia, ni la cadencia del job, ni cómo se refrescó. Una cifra concreta y una descripción
+operativa juntas identifican al cliente aunque no lo nombren. Las magnitudes que justifican una
+severidad van en la regla, dentro de `reglas.md`, y solo las imprescindibles.

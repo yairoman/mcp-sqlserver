@@ -40,12 +40,12 @@ lo pidan.
 ## Regla 1 — Una carpeta por investigación
 
 **Cada tarea de investigación o rendimiento genera su propia carpeta bajo `docs/`,
-nombrada con el proceso o plan que se está trabajando. Toda la documentación que
-produzca esa tarea vive ahí dentro. Sin excepciones.**
+nombrada con el proceso o plan que se está trabajando **y con el servidor SQL donde se
+mide**. Toda la documentación que produzca esa tarea vive ahí dentro. Sin excepciones.**
 
 ```
 docs/
-  <slug-del-proceso>/
+  <slug-del-proceso>-<servidor>/
     README.md                      <- índice e itinerario de la carpeta
     analisis-<slug>.html           <- informe
     analisis-<slug>.pdf            <- mismo informe, renderizado
@@ -62,20 +62,47 @@ No dejes scripts de una investigación en la carpeta de otra.
 
 | Trabajo | Carpeta |
 |---|---|
-| Optimizar un procedimiento concreto | `docs/<nombredelprocedimiento>/` |
-| Diagnóstico de rendimiento de la instancia | `docs/diagnostico-instancia-2026-07/` |
-| Plan de remediación de una base | `docs/remediacion-<nombredelabase>/` |
-| Revisar índices de una tabla | `docs/indices-<nombredelatabla>/` |
+| Optimizar un procedimiento concreto | `docs/<nombredelprocedimiento>-<servidor>/` |
+| Diagnóstico de rendimiento de la instancia | `docs/diagnostico-instancia-<servidor>-2026-07/` |
+| Plan de remediación de una base | `docs/remediacion-<nombredelabase>-<servidor>/` |
+| Revisar índices de una tabla | `docs/indices-<nombredelatabla>-<servidor>/` |
+
+**El nombre del servidor SQL es obligatorio en el slug.** `<servidor>` es el `@@SERVERNAME` de la
+conexión del MCP, en minúsculas y `kebab-case`, como sufijo: para un procedimiento `MiProceso`
+medido en `SRV-SQL-QA-01`, la carpeta es `docs/miproceso-srv-sql-qa-01/`. Es lo que impide mezclar
+la telemetría de dos instancias bajo un mismo nombre y lo que permite que la misma investigación
+exista en DEV, QA y producción como tres carpetas distintas.
 
 Los nombres reales de objetos y bases **solo** aparecen dentro de `docs/`, que está en
 `.gitignore`. Nunca en los skills, que sí se versionan. Ver la política de anonimización en el
 skill `buenas-practicas-sql`.
 
 Si la investigación se repite en el tiempo (un diagnóstico trimestral), añade el periodo
-al slug. Si es sobre un objeto concreto, el nombre del objeto **es** el slug.
+al slug. Si es sobre un objeto concreto, el nombre del objeto más el servidor **es** el slug.
 
 Cuando arranques una investigación, **crea la carpeta antes de escribir el primer archivo**
 y dilo en tu respuesta, para que quede claro dónde va a quedar todo.
+
+### Declarar el entorno al crear la carpeta
+
+El mismo objeto existe en varios entornos (DEV, QA, producción) con datos, telemetría y
+permisos distintos, y un informe que no dice de cuál salió no se puede aplicar ni comparar.
+Por eso, **en el momento de crear la carpeta**, antes de la primera consulta de evidencia:
+
+1. Ejecuta `SELECT @@SERVERNAME, SERVERPROPERTY('Edition'), SERVERPROPERTY('ProductVersion')`
+   contra la conexión del MCP. No lo des por sabido: el `.env` puede haber cambiado de
+   instancia entre sesiones.
+2. Escribe en el `README.md` de la carpeta, como primer bloque después del título, la ficha
+   **Entorno medido**: nombre de la instancia, rol (DEV / QA / producción), edición, versión,
+   fecha de inicio del análisis y, si aplica, de dónde vienen las bases (restore de producción
+   del día X). Toda evidencia posterior se entiende medida ahí salvo que se diga lo contrario.
+3. Dilo en la respuesta al usuario al anunciar la carpeta: «carpeta `docs/<slug>-<servidor>/`,
+   entorno `<instancia>` (<rol>)».
+
+Si la misma investigación se repite en otro entorno, no reutilices la carpeta: como el servidor
+forma parte del slug, la misma investigación en otra instancia produce otra carpeta por
+construcción (`docs/<proc>-<servidor-dev>/` y `docs/<proc>-<servidor-qa>/`), y los dos paquetes
+conviven sin confundirse.
 
 ---
 
@@ -83,13 +110,14 @@ y dilo en tu respuesta, para que quede claro dónde va a quedar todo.
 
 Es lo primero que abre quien reciba el paquete. Debe responder, en ese orden:
 
-1. **Qué se investigó y por qué** — una línea. Si hubo un incidente, cítalo.
-2. **El aviso de estado**: `> **NADA DE ESTO SE HA EJECUTADO.**` seguido del alcance
+1. **Entorno medido** — la ficha de la Regla 1: instancia, rol, edición, versión, fecha.
+2. **Qué se investigó y por qué** — una línea. Si hubo un incidente, cítalo.
+3. **El aviso de estado**: `> **NADA DE ESTO SE HA EJECUTADO.**` seguido del alcance
    real de lo que sí se hizo (p. ej. "toda la sesión de análisis fue solo lectura").
-3. **Tabla de archivos** con tipo y nivel de confianza de cada uno.
-4. **Orden de ejecución** de los scripts, como bloque de código.
-5. **Reglas de aplicación** — las advertencias que pueden romper producción.
-6. **Rollback** — cómo se deshace cada cosa.
+4. **Tabla de archivos** con tipo y nivel de confianza de cada uno.
+5. **Orden de ejecución** de los scripts, como bloque de código.
+6. **Reglas de aplicación** — las advertencias que pueden romper producción.
+7. **Rollback** — cómo se deshace cada cosa.
 
 ---
 
