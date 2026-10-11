@@ -9,6 +9,121 @@ señal de que son estilo del equipo y no descuidos.
 
 ---
 
+## v22 — 2026-09-12 · Repetir la auditoría un día después: lo que cambió, y lo que ayer se midió sin leer
+
+**Origen:** nueva revisión general de la misma instancia veinticuatro horas después de la anterior.
+La comparación con la línea base mostró que nada se había aplicado —esperable— y dos cosas que el
+día anterior no se vieron: la rutina de respaldo que había cerrado el hallazgo crítico previo no
+incluía todas las bases del grupo de disponibilidad, y el objeto de negocio con más CPU, anotado
+ayer como «nuevo, sin leer», resultó ser un sondeo correcto sobre una tabla sin ningún índice.
+También corrigió una lectura del paquete anterior: la proporción de señal de una espera de cesión
+de scheduler se había presentado como presión de CPU.
+
+**Ninguna regla nueva y cuatro reforzadas.**
+
+- **R-24** (heaps): el sondeo sobre un heap sin índices, con casi todas las filas en estado final y
+  respuesta vacía de media, es el objeto más caro de la instancia y el arreglo más barato; firma en
+  Query Store (`avg_rowcount` cero con lecturas y ejecuciones altas); por qué el índice no debe ser
+  filtrado cuando el estado llega en una variable; y la variante de cola con `varchar(max)` que se
+  degrada sola por registros reenviados.
+- **R-28** (instrumentación): la proporción de señal de `SOS_SCHEDULER_YIELD` es estructural y no
+  mide saturación; la utilización real sale del anillo del scheduler; y el coste del instrumento se
+  compara con el de la aplicación en núcleos, a partir de dos fotos del plan cache y de Query Store
+  en la misma ventana.
+- **R-35** (lo que no viaja con el restore): la rutina de respaldo con lista explícita no cubre las
+  bases que entraron después; la cobertura se comprueba por diferencia; y el respaldo puente forma
+  parte de la cadena.
+- **R-14** (funciones escalares): `is_inlineable = 1` con la incorporación activa tampoco garantiza
+  nada; la prueba de que no se incorporó es que la función aparezca como módulo propio en Query
+  Store o en el plan cache.
+
+**Revisado y sin cambios:** R-22 (conversión implícita de la clave entera a texto dentro de un
+`LIKE` con `ISNULL`, en un contador de alta frecuencia: se anota, no es lo que cuesta), R-40 (la
+recomendación del motor para una tabla de notificaciones coincidía con la consulta y con un índice
+existente sin uso: sustituir, no añadir), R-23 (índice sin lecturas en el periodo de evidencia:
+`DISABLE`, no `DROP`) y R-39 (jobs en verde y sin fallos, con el sondeo entre ellos).
+
+**Lo que no se promovió:** el parseo de parámetros con una decena de llamadas anidadas a un
+procedimiento de división de cadenas por cada ejecución del sondeo. Es coste real y es estilo del
+equipo, pero no se midió aparte del objeto que lo contiene.
+
+---
+
+## v21 — 2026-09-03 · Tres defectos conocidos en una sola sentencia, y el parche anterior los destapó
+
+**Origen:** tercer paquete sobre la misma cadena de ejecución. Tras aplicar el parche al
+procedimiento hijo —que cumplió: sus dos sentencias caras bajaron varios órdenes de magnitud— el job
+siguió tardando lo mismo en sus peores corridas. Descomponer esa diferencia llevó a un procedimiento
+anidado, y dentro de él a una sola sentencia `UPDATE` que consume la mayor parte del módulo, gasta
+casi todo su tiempo en CPU leyendo muy poco, y no actualiza ninguna fila.
+
+**Ninguna regla nueva y una reforzada.** Los tres defectos que se combinan en esa sentencia ya
+estaban en el catálogo por separado: una tabla temporal sin índice, una función sobre la columna
+dentro del predicado correlacionado, y un `OR` con un parámetro que obliga a un plan único. Que
+aparezcan juntos en veinticinco líneas es la observación de la v1 otra vez: no son descuidos
+aislados.
+
+**Regla reforzada:**
+
+- **R-16** (indexar temporales según cómo se consultan): sub-caso en el que **la convención existe y
+  está bien aplicada**, lo que hace el hueco invisible en revisión. El módulo creaba una veintena de
+  temporales y les añadía media docena de índices, todos colocados con criterio; la única que se
+  quedó sin ninguno era la de la sentencia más cara. Cuando una práctica se cumple en seis sitios, la
+  ausencia en el séptimo se lee como decisión. Se añade además una señal de detección barata:
+  `avg_rowcount` igual a cero en Query Store señala sentencias caras que no producen salida.
+
+**Revisado y sin cambios:** R-01 (la función sobre la columna dentro del `NOT EXISTS`), R-06 (el
+catch-all con parámetro, con su firma habitual de muchas compilaciones y muchos planes sin dar con
+uno bueno), R-28 (el costo de un procedimiento incluye el de los módulos que llama, que es lo que
+hizo falta para atribuir bien el tiempo) y R-41 (dos conjuntos vacíos pasan la verificación limpia:
+esta vez se anticipó en lugar de sufrirse, y el script de equivalencia se escribió con un bloque
+previo que obliga a encontrar un caso que sí produzca filas).
+
+**Lo que no se promovió:** que la sentencia no marque ninguna fila en ninguna ejecución registrada.
+Puede ser correcto o puede ser lógica que dejó de alcanzar su caso, y distinguirlo es una pregunta
+funcional. Queda como hallazgo del informe, no como regla.
+
+---
+
+## v20 — 2026-09-03 · Un diagnóstico de rendimiento que encontró primero un riesgo de disco
+
+**Origen:** repetición acotada de una revisión de instancia, esta vez sobre las tres bases que
+concentran la mayor parte del CPU. La pregunta era de rendimiento y la respuesta empezó por otro
+lado: las bases estaban en recovery completo, obligadas por un grupo de disponibilidad, sin ningún
+job de respaldo en la instancia y con los logs al borde del 100 % sobre un volumen compartido. El
+rendimiento resultó ser el segundo asunto, con el servidor lejos de la saturación y sin contención.
+
+**Ninguna regla nueva y una reforzada.** Todo lo demás que apareció ya estaba en el catálogo, lo
+que en sí es la señal de que cubre el terreno: funciones escalares por fila, paralelismo como
+efecto de estimaciones malas, índices sin uso y redundantes, bitácoras en heap sin índice por
+fecha, muestreo bajo de estadísticas y un colector de monitorización que encabeza el consumo.
+
+**Regla reforzada:**
+
+- **R-35** (una migración mueve los datos, no la puesta a punto): segunda observación del corolario
+  del log sin truncar, y peor que la primera. No es que los jobs de respaldo no se recrearan: es
+  que no existe ninguno, y el último respaldo es el del propio restore. Aporta tres cosas: que con
+  un grupo de disponibilidad no cabe el atajo de pasar a `SIMPLE`; que el job de mantenimiento
+  acelera la caída, porque cada reconstrucción genera log que no se puede truncar; y que conviene
+  comprobar si la suite de mantenimiento instalada incluye el procedimiento de respaldo, porque es
+  frecuente encontrarla sin él y leer "hay mantenimiento" como "hay respaldos".
+
+**Revisado y sin cambios:** R-14 (funciones escalares con millones de llamadas y un solo llamador),
+R-34 en su firma inversa (CPU por encima de duración en un precálculo por lotes), R-40 (dos
+recomendaciones del motor descartadas: una pedía indexar la segunda columna de una clave agrupada,
+otra el índice número diecisiete de una tabla), R-23 (índices sin lecturas y redundantes por
+prefijo, con la evidencia de días que obliga a deshabilitar en vez de borrar), R-24 (bitácoras en
+heap, una con una relación de bytes por fila que solo puede ser espacio muerto), R-25 (verificación
+de página sin suma de comprobación en la base mayor) y R-28 (el colector de monitorización como
+mayor consumidor de CPU, tercera aparición en la misma instancia; y Query Store acercándose a su
+techo, que al alcanzarlo enmudece sin aviso).
+
+**Lo que no se promovió:** el patrón de un procedimiento que escribe en otra base a horario fijo y
+espera por lock. Se observó una sola vez y no se midió su alcance: es una observación del informe,
+no una regla.
+
+---
+
 ## v19 — 2026-09-02 · Un seek por el prefijo de la clave que devuelve todas las filas del tipo
 
 **Origen:** análisis de un procedimiento por lotes que revisa el estado de una entidad, llamado en

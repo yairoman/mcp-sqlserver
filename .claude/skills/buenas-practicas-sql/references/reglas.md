@@ -391,6 +391,23 @@ Dos señales que delatan este sub-caso en revisión, ambas baratas de comprobar:
   medias cada uno): no había un plan bueno que forzar, porque el problema era la forma de la
   consulta.
 
+**Sub-caso medido — la proporción de señal de `SOS_SCHEDULER_YIELD` no mide presión de CPU.** Una
+auditoría usó como control secundario «casi toda la espera de `SOS_SCHEDULER_YIELD` es señal», leído
+como cola de CPU; la siguiente midió la utilización real con el anillo del scheduler
+(`RING_BUFFER_SCHEDULER_MONITOR`, `ProcessUtilization` y `SystemIdle` por minuto) y el servidor estaba
+por debajo de un cuarto de su capacidad en todo momento. La razón es estructural: esa espera se
+produce cuando una tarea agota su cuanto y cede el scheduler voluntariamente, y el tiempo hasta que
+vuelve es, por definición, casi todo señal. Dice cuánto trabajo largo de CPU hay, no si faltan
+núcleos. El *signal wait* que sí informa es el de las esperas de bloqueo e I/O; para saturación de
+CPU, el anillo del scheduler o los contadores del sistema operativo.
+
+Y la manera de comparar el coste del instrumento con el de la aplicación es en **núcleos**, no en
+horas acumuladas desde arranques distintos: dos fotos del plan cache separadas por unas horas dan el
+delta de CPU y el de ejecuciones, y de ahí sale el ritmo (CPU por hora, intervalo entre
+ejecuciones); Query Store da el consumo de la aplicación en las mismas 24 h. En el caso medido el
+colector salía a media unidad de CPU permanente —más que las bases principales juntas— y su
+frecuencia no había cambiado entre una auditoría y la siguiente.
+
 ## R-29 · Un identificador sin validar en el `WHERE` de una escritura masiva [obs]
 
 **Severidad:** crítica — *es bloqueo de instancia y pérdida de datos a la vez*
@@ -1017,6 +1034,18 @@ contrastarlas con `EXCEPT` en las dos direcciones (ver skill `analisis-bd`).
 
 ---
 
+**Tercera observación: la rutina de respaldo existe, y su lista no incluye las bases que llegaron
+después.** Tras cerrarse el hallazgo anterior con una rutina externa que respaldaba el log cada
+pocas horas, la siguiente auditoría midió la cobertura por diferencia —bases en `FULL` sin un
+respaldo de log en las últimas 24 h— y aparecieron dos: las que habían entrado al grupo de
+disponibilidad por un sembrado manual el mismo día en que se configuró la rutina, y que no estaban
+en su lista. Días con `log_reuse_wait = LOG_BACKUP`, el log al borde del 100 % y crecimientos
+configurados en pasos de decenas de GB replicados síncronamente. Dos lecciones: «hay respaldos» se
+comprueba por diferencia, no por existencia (`sys.databases` en `FULL` menos `msdb.dbo.backupset`
+con `type = 'L'` en 24 h, y `log_reuse_wait_desc` como confirmación); y un respaldo de log tomado
+fuera de la rutina forma parte de la cadena, así que el puente se deja en la misma carpeta y con el
+mismo patrón de nombre, o rompe la restauración que la rutina supone.
+
 ## R-36 · `READPAST` en una escritura salta filas en silencio [obs]
 
 **Severidad:** alta
@@ -1209,6 +1238,19 @@ que 2019+ resuelve las UDF escalares, consultar `is_inlineable`; si es 0, la reg
 que en 2016. Y una función de cifrado de otra base en la lista del `SELECT`, **ocho veces por
 fila**, es la misma regla con otro nombre.
 
+**Sub-caso medido — `is_inlineable = 1` tampoco lo garantiza: la incorporación se decide en cada
+sentencia llamadora.** Base en compat 160, `TSQL_SCALAR_UDF_INLINING = ON` y una función escalar con
+`is_inlineable = 1` en `sys.sql_modules`; aun así la función aparecía **como módulo propio** en Query
+Store y en el plan cache, con su propio conteo de ejecuciones y sus propias lecturas —segundos de CPU
+por llamada—, lo que solo puede ocurrir si se ejecuta sin incorporar. El llamador la invocaba en la
+lista del `SELECT` de un `INSERT` sobre una variable de tabla. La comprobación definitiva no es la
+columna del catálogo sino la presencia del cuerpo de la función como objeto separado en
+`sys.query_store_query.object_id` o en `sys.dm_exec_query_stats`: si está, no se incorporó, valga lo
+que valga `is_inlineable`. Y el coste unitario de la llamada era de esquema: filtraba una tabla de
+millones de filas por una columna por la que no empezaba ningún índice, así que cada llamada recorría
+un índice de cientos de MB. El índice arregla el coste unitario; la incorporación, si algún día
+ocurre, es un extra con el que no hay que contar.
+
 ## R-15 · Funciones de tabla: inline, no multi-statement [obs]
 
 Observado: una función de tabla multi-statement (`RETURNS @tabla TABLE`) invocada con
@@ -1233,6 +1275,22 @@ tres columnas, pero su único índice era por otras dos. Cada pasada era un scan
 
 Contrapeso: crear índices sobre un `#temp` dentro del procedimiento **inhabilita el caché de
 objetos temporales**. Compensa si el temporal es grande; con unos cientos de filas, no.
+
+**Sub-caso medido — la convención existe, y justo por eso el hueco no se ve.** Un procedimiento de
+miles de líneas creaba una veintena de tablas temporales y les añadía media docena de índices, todos
+colocados con criterio: después de poblar la tabla y sobre las columnas por las que se filtra. Una
+sola se quedó sin ninguno, y era la que participaba en el `JOIN` de la sentencia más cara del módulo.
+En revisión, un objeto donde la práctica está aplicada correctamente en seis sitios no levanta
+sospecha en el séptimo: la ausencia se lee como decisión. La comprobación que lo cierra es mecánica,
+y conviene hacerla siempre que un plan muestre `Table Scan` sobre un `#temp`: listar las temporales
+del módulo, listar los índices que se les crean, y restar.
+
+> **Y una señal de detección que no cuesta nada: `avg_rowcount` igual a cero.** En Query Store, una
+> sentencia cara cuya media de filas devueltas o afectadas es cero está haciendo trabajo que no
+> produce salida. No prueba que sobre —puede ser correcta y no encontrar coincidencias en estos
+> datos—, pero es el filtro más barato para encontrar cómputo desperdiciado: ordenar por duración y
+> mirar esa columna. En el caso medido, la sentencia que consumía la mayor parte del procedimiento
+> llevaba días sin marcar una sola fila, en decenas de ejecuciones y con planes distintos.
 
 ## R-17 · `UNION` deduplica; usa `UNION ALL` salvo que necesites lo contrario [obs]
 
@@ -1573,6 +1631,26 @@ histórico de decenas de millones de filas leído por el procedimiento de horas 
 una base de importación que era **más de un centenar de heaps y decenas de GB** sin un solo
 índice agrupado. `IndexOptimize` no toca heaps: nada de eso se desfragmenta nunca por
 mantenimiento.
+
+**Sub-caso medido — el sondeo sobre un heap: miles de páginas por cero filas, cada pocos segundos.**
+El objeto de negocio con más CPU acumulada de una instancia entera no era un procedimiento complejo
+sino una consulta correcta —tres igualdades y un `ORDER BY` por la identidad— que una aplicación
+lanzaba cada pocos segundos para preguntar «¿hay algo pendiente para este par de identificadores?»
+sobre una tabla de cientos de miles de filas **sin ningún índice**, ni agrupado ni no agrupado. La
+práctica totalidad de las filas estaba en el estado final y solo unas decenas en el pendiente, así
+que cada pregunta recorría toda la tabla para devolver, de media, **cero filas**. La firma en Query
+Store es inconfundible y barata de buscar: ejecuciones altas, lecturas medias en los miles y
+`avg_rowcount` igual a cero. El índice vale precisamente porque la respuesta es vacía: un seek que no
+encuentra nada cuesta dos o tres páginas. Y no conviene hacerlo filtrado por el estado si ese estado
+llega en una variable local leída de una tabla de configuración —el optimizador no empareja un índice
+filtrado con una variable sin `OPTION (RECOMPILE)`—; un índice normal con el estado como primera
+columna da el mismo resultado sin esa dependencia.
+
+Segundo heap del mismo caso, la variante que se degrada sola: una cola de comandos cuyo resultado se
+escribe en un `varchar(max)` tras cada ejecución, con **casi una cuarta parte de sus registros
+reenviados**; el `IF EXISTS` por estado que la sondeaba cada minuto leía el doble de páginas de las
+que la tabla ocupaba, porque pagaba cada reenvío. Un índice por el estado resuelve el sondeo; solo la
+clave agrupada evita que cada `UPDATE` vuelva a reenviar.
 
 ## R-25 · La configuración por defecto de la instancia no es la correcta [obs]
 
@@ -2254,6 +2332,27 @@ mejora posterior — en las bases que no lo tenían, no existe línea base y ya 
 > `log_reuse_wait_desc = 'LOG_BACKUP'` el primer día. Si los jobs de respaldo de log no se
 > recrearon, el log de cada base en `FULL` crece sin truncarse hasta llenar la unidad. Se
 > comprueba en cinco minutos y fue el hallazgo de consecuencia más brusca del caso medido.
+
+**Segunda observación, peor que la primera: no es que los jobs no se recrearan, es que no hay
+ninguno.** Medido en un entorno restaurado desde producción para analizarlo: cero jobs de respaldo
+en el Agent, cero pasos de job que contengan `BACKUP`, y el último respaldo registrado es el del
+propio restore. Todas las bases en `FULL` con el log al borde del 100 %, sobre un volumen
+compartido con espacio para semanas, no meses. Tres cosas que conviene tener presentes cuando
+aparece esta forma:
+
+- **Con un grupo de disponibilidad no hay atajo.** El AG exige recovery `FULL`, así que pasar a
+  `SIMPLE` —la salida habitual en un entorno no productivo— no es una opción. La única salida es
+  respaldar el log.
+- **El mantenimiento acelera el problema.** Cada reconstrucción de índice genera log que no se
+  puede truncar: la operación que mantiene sanas las tablas es también la que más acerca el
+  volumen a llenarse. Un entorno con mantenimiento semanal y sin respaldos tiene fecha de caída.
+- **Comprobar si la suite de mantenimiento instalada trae el procedimiento de respaldo.** Es
+  frecuente encontrar el optimizador de índices y el ejecutor de comandos sin él, y entonces
+  "hay suite de mantenimiento" se lee como "hay respaldos" sin serlo. Se verifica con una consulta
+  a `sys.objects` en `master`.
+
+Y el primer respaldo de log pesa lo que el log tiene usado: hay que comprobar el espacio del
+destino antes de programarlo, y que ese destino no sea el mismo volumen que se quiere aliviar.
 
 Relacionada con R-25 (configuración por defecto), R-28 (medir antes de concluir), R-06, R-14 y
 R-19 (lo que el compat level habilita).
