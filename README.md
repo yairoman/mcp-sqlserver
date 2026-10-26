@@ -332,6 +332,282 @@ Finalmente, clic en **Guardar**.
 
 ---
 
+## Ejemplos de uso
+
+Así se ve el servidor en una conversación real. En el día a día **no escribes JSON**: le pides
+algo al LLM en lenguaje natural, el LLM elige la tool y sus argumentos, y te explica el resultado.
+Cada ejemplo muestra las tres piezas: lo que pides, la llamada que hace el LLM y lo que devuelve
+la tool.
+
+> ⚠️ Todas las salidas son **ejemplo ilustrativo (datos ficticios)**. Están armadas a partir del
+> formato que produce cada tool; los nombres, cifras y tiempos son inventados.
+
+### La base de ejemplo: `TiendaDemo`
+
+Una tienda online inventada, con cuatro tablas en el esquema `dbo`:
+
+| Tabla                | Columnas principales                                                        |
+| -------------------- | --------------------------------------------------------------------------- |
+| `dbo.Clientes`       | `ClienteId` (PK), `Nombre`, `Email`, `FechaAlta`                            |
+| `dbo.Productos`      | `ProductoId` (PK), `Nombre`, `Categoria`, `Precio`                          |
+| `dbo.Pedidos`        | `PedidoId` (PK), `ClienteId` (FK → Clientes), `FechaPedido`, `Estado`, `Total` |
+| `dbo.DetallePedidos` | `DetalleId` (PK), `PedidoId` (FK → Pedidos), `ProductoId` (FK → Productos), `Cantidad`, `PrecioUnitario` |
+
+La conexión de los ejemplos apunta a `localhost` con un usuario de marcador (`<tu_usuario>`); la
+configuración real se explica en la sección «Variables de Entorno».
+
+### 1. Esquema — ¿cómo es una tabla?
+
+**Tú:** «¿Qué columnas tiene la tabla de pedidos de TiendaDemo?»
+
+**El LLM llama a** `describe_table`:
+
+```json
+{
+  "database": "TiendaDemo",
+  "schema": "dbo",
+  "table": "Pedidos"
+}
+```
+
+**Salida** — ejemplo ilustrativo (datos ficticios):
+
+```text
+**Columns in [TiendaDemo].[dbo].[Pedidos]** (5 items)
+
+- **columnName**: PedidoId | **dataType**: int | **maxLength**: 4 | **precision**: 10 | **scale**: 0 | **isNullable**: false | **isPrimaryKey**: 1 | **isForeignKey**: 0 | **isIdentity**: true | **isComputed**: false | **defaultValue**: _NULL_ | **description**: _NULL_
+- **columnName**: ClienteId | **dataType**: int | **maxLength**: 4 | **precision**: 10 | **scale**: 0 | **isNullable**: false | **isPrimaryKey**: 0 | **isForeignKey**: 1 | **isIdentity**: false | **isComputed**: false | **defaultValue**: _NULL_ | **description**: _NULL_
+- **columnName**: FechaPedido | **dataType**: datetime2 | **maxLength**: 6 | **precision**: 19 | **scale**: 0 | **isNullable**: false | **isPrimaryKey**: 0 | **isForeignKey**: 0 | **isIdentity**: false | **isComputed**: false | **defaultValue**: (sysdatetime()) | **description**: _NULL_
+- **columnName**: Estado | **dataType**: varchar | **maxLength**: 20 | **precision**: 0 | **scale**: 0 | **isNullable**: false | **isPrimaryKey**: 0 | **isForeignKey**: 0 | **isIdentity**: false | **isComputed**: false | **defaultValue**: ('PENDIENTE') | **description**: _NULL_
+- **columnName**: Total | **dataType**: decimal | **maxLength**: 9 | **precision**: 12 | **scale**: 2 | **isNullable**: false | **isPrimaryKey**: 0 | **isForeignKey**: 0 | **isIdentity**: false | **isComputed**: false | **defaultValue**: ((0)) | **description**: _NULL_
+```
+
+El LLM lo resume: `PedidoId` es identidad y PK, `ClienteId` es la FK hacia `Clientes`, y
+`FechaPedido` toma la fecha del servidor por defecto.
+
+### 2. Datos — una consulta de negocio
+
+**Tú:** «¿Quiénes son los 5 clientes que más compraron en 2026?»
+
+**El LLM llama a** `execute_select_query` (solo admite `SELECT`/`WITH`):
+
+```json
+{
+  "database": "TiendaDemo",
+  "query": "SELECT TOP 5 c.ClienteId, c.Nombre, COUNT(*) AS Pedidos, SUM(p.Total) AS TotalComprado FROM dbo.Clientes c INNER JOIN dbo.Pedidos p ON p.ClienteId = c.ClienteId WHERE p.FechaPedido >= '2026-01-01' AND p.FechaPedido < '2027-01-01' GROUP BY c.ClienteId, c.Nombre ORDER BY TotalComprado DESC"
+}
+```
+
+**Salida** — ejemplo ilustrativo (datos ficticios):
+
+```text
+**Query Results** (5 rows, 38ms)
+
+| ClienteId | Nombre | Pedidos | TotalComprado |
+| --- | --- | --- | --- |
+| 1207 | Cliente Demo 1207 | 41 | 18240.75 |
+| 88 | Cliente Demo 0088 | 36 | 15112.4 |
+| 3415 | Cliente Demo 3415 | 29 | 12980.15 |
+| 502 | Cliente Demo 0502 | 33 | 11745.9 |
+| 2760 | Cliente Demo 2760 | 18 | 10033.25 |
+```
+
+> El validador rechaza cualquier consulta con `--`, `/*` o `*/`, aunque el resto sea un `SELECT`
+> válido. Por eso el LLM escribe el SQL sin comentarios y explica la intención en el mensaje.
+
+### 3. Consulta — ¿por qué esta consulta lee tanto?
+
+**Tú:** «Revisa el plan de esta consulta, la usa el informe de envíos y tarda mucho:
+`SELECT PedidoId, Total FROM dbo.Pedidos WHERE YEAR(FechaPedido) = 2026 AND Estado = 'ENVIADO'`»
+
+**El LLM llama a** `explain_query` (plan estimado, no ejecuta la consulta):
+
+```json
+{
+  "database": "TiendaDemo",
+  "query": "SELECT PedidoId, Total FROM dbo.Pedidos WHERE YEAR(FechaPedido) = 2026 AND Estado = 'ENVIADO'"
+}
+```
+
+**Salida** — ejemplo ilustrativo (datos ficticios):
+
+````text
+**Estimated Execution Plan**
+
+```
+SELECT PedidoId, Total FROM dbo.Pedidos WHERE YEAR(FechaPedido) = 2026 AND Estado = 'ENVIADO'
+  |--Clustered Index Scan(OBJECT:([TiendaDemo].[dbo].[Pedidos].[PK_Pedidos]), WHERE:(datepart(year,[TiendaDemo].[dbo].[Pedidos].[FechaPedido])=(2026) AND [TiendaDemo].[dbo].[Pedidos].[Estado]='ENVIADO'))
+```
+````
+
+El LLM señala el problema: `YEAR(FechaPedido)` envuelve la columna en una función, así que el
+predicado no es sargable y el motor recorre la tabla entera. Propone el rango equivalente
+`FechaPedido >= '2026-01-01' AND FechaPedido < '2027-01-01'`, que puede usar un índice sobre
+`FechaPedido`, y vuelve a pedir el plan para comprobarlo.
+
+### 4. Rendimiento — «la tienda va lenta»
+
+**Tú:** «Los usuarios dicen que la tienda va lenta. ¿El servidor está esperando o trabajando?»
+
+**El LLM llama a** `get_performance_triage` (mide una ventana en vivo; tarda lo que dure la
+muestra):
+
+```json
+{
+  "sampleSeconds": 30
+}
+```
+
+**Salida** — ejemplo ilustrativo (datos ficticios):
+
+```text
+# Performance Triage
+
+Measured window: **30s** · 8 cores · total wait recorded: **52800 ms**
+
+## Verdict
+
+🔴 **The server spends significant time waiting** — roughly 22.0% of available core time in the window. Leading contributor: Disk I/O (60%). This is where the investigation goes.
+
+## Where the time went
+
+| Family | Wait ms | % of window | Top wait type |
+| --- | ---: | ---: | --- |
+| Disk I/O | 31680 | 60% | PAGEIOLATCH_SH |
+| Parallelism | 13200 | 25% | CXPACKET |
+| CPU pressure | 5280 | 10% | SOS_SCHEDULER_YIELD |
+| Other | 2640 | 5% | MEMORY_ALLOCATION_EXT |
+
+**Disk I/O dominates.** Time is going into reading or writing storage: either the queries read far more than they need, or the storage is slow.
+
+**Next step:** `get_query_stats` sorted by logical reads, then `get_missing_indexes`. Fix the reads before blaming the disk.
+
+## Live state
+
+- Sessions blocked at start / end of window: **0** / **0**
+- Running requests at start / end: 6 / 7
+- Longest running request: 4210 ms — `SELECT` (running) by app_tiendademo
+
+---
+
+ℹ️ This measures a live window, so it only sees what happened during it. A quiet sample does not mean a healthy server — it means nothing was struggling *just now*. For problems that already happened, use `get_blocking_history` or Query Store.
+
+ℹ️ Waiting is not automatically bad: a server doing nothing also waits for nothing. Read these numbers against whether users are actually complaining.
+```
+
+No hay bloqueos y la espera dominante es de lectura de disco, así que el siguiente paso es
+buscar las consultas que más leen. Eso es el flujo de auditoría del final de esta sección.
+
+### 5. Integridad — registros huérfanos
+
+**Tú:** «¿Hay líneas de pedido que apunten a pedidos o productos que ya no existen?»
+
+**El LLM llama a** `check_referential_integrity`, limitado a una tabla:
+
+```json
+{
+  "database": "TiendaDemo",
+  "table": "DetallePedidos"
+}
+```
+
+**Salida** — ejemplo ilustrativo (datos ficticios):
+
+```text
+**⚠️ Referential Integrity Violations (1 FKs with orphans)** (1 items)
+
+| fkName | parentTable | parentColumn | referencedTable | referencedColumn | orphanedRecords |
+| --- | --- | --- | --- | --- | --- |
+| FK_DetallePedidos_Productos | dbo.DetallePedidos | ProductoId | dbo.Productos | ProductoId | 14 |
+```
+
+Si una FK está activa y es de confianza, no puede haber huérfanos; que aparezcan indica que la
+restricción se creó o se reactivó `WITH NOCHECK`, o que estuvo deshabilitada mientras se
+borraban productos. El LLM puede listar las 14 filas con `execute_select_query` antes de decidir
+qué hacer con ellas.
+
+### Flujo de auditoría de rendimiento
+
+Un caso típico encadena cuatro tools. Cada paso usa la salida del anterior para decidir el
+siguiente; el propio triage ya sugiere por dónde seguir.
+
+**Tú:** «Desde las 10 de la mañana la tienda va lenta. Averigua por qué y propón un arreglo.»
+
+**Paso 1 — `get_performance_triage`.** ¿Espera o trabaja?
+
+```json
+{
+  "sampleSeconds": 30
+}
+```
+
+Resultado: el del ejemplo 4. Sin bloqueos; la familia *Disk I/O* acapara el 60 % de la espera y
+el veredicto apunta a las consultas que más leen.
+
+**Paso 2 — `get_query_stats`.** ¿Qué consultas leen más?
+
+```json
+{
+  "sortBy": "reads",
+  "top": 5
+}
+```
+
+Salida, recortada a la primera consulta — ejemplo ilustrativo (datos ficticios):
+
+```text
+**Top Queries by READS** (5 items)
+
+- **databaseName**: TiendaDemo | **queryText**: SELECT PedidoId, Cantidad, PrecioUnitario FROM dbo.DetallePedidos WHERE ProductoId = @ProductoId | **executions**: 18450 | **totalCpuMs**: 405900 | **avgCpuMs**: 22 | **totalDurationMs**: 553500 | **avgDurationMs**: 30 | **totalReads**: 1291500000 | **avgReads**: 70000 | **totalWrites**: 0 | **planCreated**: 2026-10-26T09:58:12.403Z | **lastExecution**: 2026-10-26T11:41:07.950Z
+```
+
+Una consulta sencilla lee 70 000 páginas en cada ejecución y se ejecuta miles de veces.
+
+**Paso 3 — `explain_query`.** ¿Por qué lee tanto?
+
+```json
+{
+  "database": "TiendaDemo",
+  "query": "SELECT PedidoId, Cantidad, PrecioUnitario FROM dbo.DetallePedidos WHERE ProductoId = 1042"
+}
+```
+
+Salida — ejemplo ilustrativo (datos ficticios):
+
+````text
+**Estimated Execution Plan**
+
+```
+SELECT PedidoId, Cantidad, PrecioUnitario FROM dbo.DetallePedidos WHERE ProductoId = 1042
+  |--Clustered Index Scan(OBJECT:([TiendaDemo].[dbo].[DetallePedidos].[PK_DetallePedidos]), WHERE:([TiendaDemo].[dbo].[DetallePedidos].[ProductoId]=(1042)))
+```
+````
+
+No hay índice que empiece por `ProductoId`: cada búsqueda recorre la tabla completa.
+
+**Paso 4 — `get_missing_indexes`.** ¿Lo confirma el optimizador?
+
+```json
+{
+  "database": "TiendaDemo"
+}
+```
+
+Salida — ejemplo ilustrativo (datos ficticios):
+
+```text
+**Missing Indexes (Recommended) — [TiendaDemo]** (1 items)
+
+- **schema**: dbo | **tableName**: DetallePedidos | **equalityColumns**: [ProductoId] | **inequalityColumns**: _NULL_ | **includedColumns**: [PedidoId], [Cantidad], [PrecioUnitario] | **estimatedImprovement**: 18727488 | **seeks**: 18450 | **scans**: 0 | **avgCost**: 10.4 | **avgImpactPct**: 97.6
+```
+
+**Conclusión del LLM:** la lentitud viene de lecturas, no del hardware. Propone un índice sobre
+`dbo.DetallePedidos (ProductoId)` que incluya `PedidoId`, `Cantidad` y `PrecioUnitario`, y lo
+deja como **propuesta** para que una persona la revise: antes de crearlo conviene mirar
+`list_indexes` y `get_index_usage_stats` para no duplicar un índice existente.
+
+---
+
 ## 📚 Resources
 
 | Resource         | URI                                 | Descripción                       |
