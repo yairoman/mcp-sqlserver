@@ -645,6 +645,8 @@ deja como **propuesta** para que una persona la revise: antes de crearlo convien
 - **Timeouts configurables**: Previene queries indefinidos
 - **Límite de filas**: Previene descarga accidental de tablas enormes
 
+El recorrido completo de una consulta (tool, `sql-sanitizer`, `MSSQL_READ_ONLY`, pool `mssql` y SQL Server, con la rama de rechazo) está en el diagrama [Flujo de una consulta](assets/diagramas/flujo-consulta.html) ([SVG](assets/diagramas/flujo-consulta.svg)).
+
 ---
 
 ## 🐳 Docker

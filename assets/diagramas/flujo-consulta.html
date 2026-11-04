@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flujo de una consulta · mcp-sqlserver</title>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{--paper:#f5f5f5;--ink:#2d3142;--muted:#4f5d75;--soft:#5a6580;--accent:#bf4520;--accent-tint:rgba(191,69,32,.08);--rule:rgba(45,49,66,.12);--label-rule:rgba(45,49,66,.20);--lane:rgba(45,49,66,.018);--node:#fff;--node-stroke:rgba(45,49,66,.25);--chip:rgba(45,49,66,.12);--dot:rgba(45,49,66,.10);--reject:#9c6b50;--sans:'Geist',system-ui,sans-serif;--serif:'Instrument Serif',serif;--mono:'Geist Mono',ui-monospace,monospace}
+    body{font-family:var(--sans);background:var(--paper);color:var(--ink);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:3rem 2rem}
+    .frame{max-width:1320px;width:100%}.eyebrow{font:500 .66rem var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin-bottom:.5rem}h1{font:400 clamp(1.5rem,2.4vw + .75rem,2rem)/1.15 var(--serif);letter-spacing:-.02em;margin-bottom:1.5rem}
+    .scroll{overflow-x:auto}svg{width:100%;min-width:1288px;display:block}
+    .note{margin-top:1rem;font:italic 1rem/1.4 var(--serif);color:var(--muted)}.note code{font:.8rem var(--mono);font-style:normal}
+    svg text{font-family:var(--sans)}.mono{font-family:var(--mono)}.lane{fill:var(--lane)}.rule{stroke:var(--rule)}.label-rule{stroke:var(--label-rule)}.actor{fill:var(--muted);font:500 8px var(--mono);letter-spacing:.08em}.step-label{fill:var(--muted);font:500 6px var(--mono);letter-spacing:.12em}.step-chip{fill:var(--chip)}.step-num{fill:var(--ink);font:600 7px var(--mono)}.connector{fill:none;stroke:var(--muted);stroke-width:1}.connector.focal{stroke:var(--accent);stroke-width:1.2}.connector.detour{stroke-dasharray:4 3}.arrow-label-mask{fill:var(--paper)}.arrow-label{fill:var(--muted);font:500 6.5px var(--mono);letter-spacing:.08em}.node-mask{fill:var(--paper)}.node{fill:var(--node);stroke:var(--node-stroke)}.node.focal{fill:var(--accent-tint);stroke:var(--accent);stroke-width:1.2}.node.reject{fill:rgba(156,107,80,.06);stroke:rgba(156,107,80,.35)}.role{fill:rgba(45,49,66,.10)}.role.focal{fill:rgba(191,69,32,.25)}.role.reject{fill:rgba(156,107,80,.18)}.role-text{fill:var(--ink);font:600 6px var(--mono)}.role-text.focal{fill:var(--accent)}.role-text.reject,.node-title.reject{fill:var(--reject)}.node-title{fill:var(--ink);font:600 9px var(--sans)}.node-sub{fill:var(--muted);font:6.5px var(--mono)}.node-tool{fill:var(--soft);font:6.5px var(--mono)}.legend-key{fill:var(--muted);font:500 7px var(--mono);letter-spacing:.12em}.legend-text{fill:var(--muted);font:8px var(--sans)}
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Proceso · mcp-sqlserver</p>
+    <h1>Flujo de una consulta, de la pregunta al resultado</h1>
+    <div class="scroll">
+    <svg viewBox="0 0 1288 596" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="flujo-consulta-title flujo-consulta-desc">
+      <title id="flujo-consulta-title">Flujo de una consulta en mcp-sqlserver</title>
+      <desc id="flujo-consulta-desc">Una consulta viaja del usuario al LLM, que llama a la tool execute_query por JSON-RPC sobre STDIO; el servidor sanea los argumentos, sql-sanitizer la valida y comprueba el modo solo lectura, rechazando la consulta con un error si falla, y si pasa el pool mssql se conecta en la primera consulta, SQL Server la ejecuta y formatQueryResult devuelve la tabla al LLM y al usuario.</desc>
+      <defs>
+        <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="11" cy="11" r="0.8" fill="var(--dot)"/></pattern>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="var(--muted)"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="var(--accent)"/></marker>
+        <marker id="arrow-sm" markerWidth="6" markerHeight="5" refX="5" refY="2.5" orient="auto"><polygon points="0 0,6 2.5,0 5" fill="var(--muted)"/></marker>
+      </defs>
+      <rect width="1288" height="596" fill="var(--paper)"/><rect width="1288" height="596" fill="url(#dots)" opacity=".55"/>
+      <rect class="lane" x="140" y="36" width="1148" height="80"/><rect class="lane" x="140" y="196" width="1148" height="80"/><rect class="lane" x="140" y="356" width="1148" height="80"/>
+      <g class="rule" stroke-width=".8"><line x1="0" y1="36" x2="1288" y2="36"/><line x1="0" y1="116" x2="1288" y2="116"/><line x1="0" y1="196" x2="1288" y2="196"/><line x1="0" y1="276" x2="1288" y2="276"/><line x1="0" y1="356" x2="1288" y2="356"/><line x1="0" y1="436" x2="1288" y2="436"/><line x1="0" y1="516" x2="1288" y2="516"/></g>
+      <line class="label-rule" x1="140" y1="36" x2="140" y2="516"/>
+      <g class="actor" text-anchor="middle">
+        <text x="70" y="80">USUARIO</text>
+        <text x="70" y="152">LLM /</text><text x="70" y="160">CLIENTE MCP</text>
+        <text x="70" y="232">SERVIDOR MCP</text><text x="70" y="240">(STDIO)</text>
+        <text x="70" y="320">VALIDACIÓN</text>
+        <text x="70" y="392">POOL</text><text x="70" y="400">MSSQL</text>
+        <text x="70" y="480">SQL SERVER</text>
+      </g>
+      <g text-anchor="middle">
+        <rect class="step-chip" x="190" y="8" width="16" height="16" rx="8"/><text class="step-num" x="198" y="19">1</text><text class="step-label" x="198" y="32">PETICIÓN</text>
+        <rect class="step-chip" x="302" y="8" width="16" height="16" rx="8"/><text class="step-num" x="310" y="19">2</text><text class="step-label" x="310" y="32">LLAMADA</text>
+        <rect class="step-chip" x="414" y="8" width="16" height="16" rx="8"/><text class="step-num" x="422" y="19">3</text><text class="step-label" x="422" y="32">ARGUMENTO</text>
+        <rect x="526" y="8" width="16" height="16" rx="8" fill="rgba(191,69,32,.20)"/><text x="534" y="19" fill="var(--accent)" font-size="7" font-weight="600" class="mono">4</text><text x="534" y="32" fill="var(--accent)" font-size="6" font-weight="500" letter-spacing=".12em" class="mono">SANITIZER</text>
+        <rect class="step-chip" x="638" y="8" width="16" height="16" rx="8"/><text class="step-num" x="646" y="19">5</text><text class="step-label" x="646" y="32">LECTURA</text>
+        <rect class="step-chip" x="750" y="8" width="16" height="16" rx="8"/><text class="step-num" x="758" y="19">6</text><text class="step-label" x="758" y="32">CONEXIÓN</text>
+        <rect class="step-chip" x="862" y="8" width="16" height="16" rx="8"/><text class="step-num" x="870" y="19">7</text><text class="step-label" x="870" y="32">EJECUCIÓN</text>
+        <rect class="step-chip" x="974" y="8" width="16" height="16" rx="8"/><text class="step-num" x="982" y="19">8</text><text class="step-label" x="982" y="32">FORMATO</text>
+        <rect class="step-chip" x="1086" y="8" width="16" height="16" rx="8"/><text class="step-num" x="1094" y="19">9</text><text class="step-label" x="1094" y="32">RESULTADO</text>
+        <rect class="step-chip" x="1196" y="8" width="20" height="16" rx="8"/><text class="step-num" x="1206" y="19">10</text><text class="step-label" x="1206" y="32">RESPUESTA</text>
+      </g>
+      <!-- Connectors: right exit, orthogonal bends, top/bottom entry; dashed = rejection detour. -->
+      <path class="connector" d="M248 76 H302 Q310 76 310 84 V124" marker-end="url(#arrow)"/>
+      <path class="connector" d="M360 156 H414 Q422 156 422 164 V204" marker-end="url(#arrow)"/>
+      <path class="connector focal" d="M472 236 H526 Q534 236 534 244 V284" marker-end="url(#arrow-accent)"/>
+      <line class="connector focal" x1="584" y1="328" x2="596" y2="328" marker-end="url(#arrow-accent)"/>
+      <path class="connector detour" d="M584 304 Q590 304 590 298 V242 Q590 236 596 236 H708" marker-end="url(#arrow-sm)"/>
+      <path class="connector detour" d="M696 304 H750 Q758 304 758 296 V268" marker-end="url(#arrow-sm)"/>
+      <path class="connector" d="M696 328 H750 Q758 328 758 336 V364" marker-end="url(#arrow)"/>
+      <path class="connector detour" d="M808 236 Q814 236 814 230 V162 Q814 156 820 156 H1044" marker-end="url(#arrow-sm)"/>
+      <path class="connector" d="M808 396 H862 Q870 396 870 404 V444" marker-end="url(#arrow)"/>
+      <path class="connector" d="M920 476 H974 Q982 476 982 468 V268" marker-end="url(#arrow)"/>
+      <path class="connector" d="M1032 236 H1086 Q1094 236 1094 228 V188" marker-end="url(#arrow)"/>
+      <path class="connector" d="M1144 156 H1198 Q1206 156 1206 148 V108" marker-end="url(#arrow)"/>
+      <g text-anchor="middle">
+        <rect class="arrow-label-mask" x="620" y="219" width="64" height="10"/><text class="arrow-label" x="652" y="227">PATRÓN VETADO</text>
+        <rect class="arrow-label-mask" x="766" y="277" width="48" height="10"/><text class="arrow-label" x="790" y="285">ESCRITURA</text>
+      </g>
+      <!-- Nodes -->
+      <g text-anchor="middle">
+        <g><rect class="node-mask" x="148" y="44" width="100" height="64" rx="6"/><rect class="node" x="148" y="44" width="100" height="64" rx="6"/><rect class="role" x="152" y="48" width="20" height="10" rx="2"/><text class="role-text" x="162" y="56">USR</text><text class="node-title" x="198" y="70">Pregunta</text><text class="node-sub" x="198" y="84">lenguaje natural</text><text class="node-tool" x="198" y="96">TiendaDemo</text></g>
+        <g><rect class="node-mask" x="260" y="124" width="100" height="64" rx="6"/><rect class="node" x="260" y="124" width="100" height="64" rx="6"/><rect class="role" x="264" y="128" width="20" height="10" rx="2"/><text class="role-text" x="274" y="136">LLM</text><text class="node-title" x="310" y="150">Llamada a tool</text><text class="node-sub" x="310" y="164">tools/call · JSON-RPC</text><text class="node-tool" x="310" y="176">execute_query</text></g>
+        <g><rect class="node-mask" x="372" y="204" width="100" height="64" rx="6"/><rect class="node" x="372" y="204" width="100" height="64" rx="6"/><rect class="role" x="376" y="208" width="20" height="10" rx="2"/><text class="role-text" x="386" y="216">MCP</text><text class="node-title" x="422" y="230">Argumentos</text><text class="node-sub" x="422" y="244">sanitizeIdentifier</text><text class="node-tool" x="422" y="256">withErrorHandling</text></g>
+        <g><rect class="node-mask" x="484" y="284" width="100" height="64" rx="6"/><rect class="node focal" x="484" y="284" width="100" height="64" rx="6"/><rect class="role focal" x="488" y="288" width="20" height="10" rx="2"/><text class="role-text focal" x="498" y="296">VAL</text><text class="node-title" x="534" y="310">Sanitizer</text><text class="node-sub" x="534" y="324">validateQuerySafety</text><text class="node-tool" x="534" y="336">sql-sanitizer.ts</text></g>
+        <g><rect class="node-mask" x="596" y="284" width="100" height="64" rx="6"/><rect class="node" x="596" y="284" width="100" height="64" rx="6"/><rect class="role" x="600" y="288" width="20" height="10" rx="2"/><text class="role-text" x="610" y="296">VAL</text><text class="node-title" x="646" y="310">Solo lectura</text><text class="node-sub" x="646" y="324">isReadOnlyQuery</text><text class="node-tool" x="646" y="336">MSSQL_READ_ONLY</text></g>
+        <g><rect class="node-mask" x="708" y="204" width="100" height="64" rx="6"/><rect class="node reject" x="708" y="204" width="100" height="64" rx="6"/><rect class="role reject" x="712" y="208" width="20" height="10" rx="2"/><text class="role-text reject" x="722" y="216">MCP</text><text class="node-title reject" x="758" y="230">Rechazo</text><text class="node-sub" x="758" y="244">Query rejected</text><text class="node-tool" x="758" y="256">no toca la base</text></g>
+        <g><rect class="node-mask" x="708" y="364" width="100" height="64" rx="6"/><rect class="node" x="708" y="364" width="100" height="64" rx="6"/><rect class="role" x="712" y="368" width="20" height="10" rx="2"/><text class="role-text" x="722" y="376">POL</text><text class="node-title" x="758" y="390">Pool diferido</text><text class="node-sub" x="758" y="404">getPool() · connect()</text><text class="node-tool" x="758" y="416">solo en la 1.ª consulta</text></g>
+        <g><rect class="node-mask" x="820" y="444" width="100" height="64" rx="6"/><rect class="node" x="820" y="444" width="100" height="64" rx="6"/><rect class="role" x="824" y="448" width="20" height="10" rx="2"/><text class="role-text" x="834" y="456">SQL</text><text class="node-title" x="870" y="470">Ejecución</text><text class="node-sub" x="870" y="484">request.query()</text><text class="node-tool" x="870" y="496">executeQueryOnDatabase</text></g>
+        <g><rect class="node-mask" x="932" y="204" width="100" height="64" rx="6"/><rect class="node" x="932" y="204" width="100" height="64" rx="6"/><rect class="role" x="936" y="208" width="20" height="10" rx="2"/><text class="role-text" x="946" y="216">MCP</text><text class="node-title" x="982" y="230">Formato</text><text class="node-sub" x="982" y="244">formatQueryResult</text><text class="node-tool" x="982" y="256">result-formatter.ts</text></g>
+        <g><rect class="node-mask" x="1044" y="124" width="100" height="64" rx="6"/><rect class="node" x="1044" y="124" width="100" height="64" rx="6"/><rect class="role" x="1048" y="128" width="20" height="10" rx="2"/><text class="role-text" x="1058" y="136">LLM</text><text class="node-title" x="1094" y="150">Resultado</text><text class="node-sub" x="1094" y="164">tabla Markdown</text><text class="node-tool" x="1094" y="176">MSSQL_MAX_ROWS</text></g>
+        <g><rect class="node-mask" x="1156" y="44" width="100" height="64" rx="6"/><rect class="node" x="1156" y="44" width="100" height="64" rx="6"/><rect class="role" x="1160" y="48" width="20" height="10" rx="2"/><text class="role-text" x="1170" y="56">USR</text><text class="node-title" x="1206" y="70">Respuesta</text><text class="node-sub" x="1206" y="84">explicada</text><text class="node-tool" x="1206" y="96">chat</text></g>
+      </g>
+      <!-- Legend strip -->
+      <g>
+        <text class="legend-key" x="144" y="535">PASOS</text>
+        <g class="step-num" text-anchor="middle">
+          <rect class="step-chip" x="208" y="524" width="16" height="16" rx="8"/><text x="216" y="535">1</text>
+          <rect class="step-chip" x="312" y="524" width="16" height="16" rx="8"/><text x="320" y="535">2</text>
+          <rect class="step-chip" x="416" y="524" width="16" height="16" rx="8"/><text x="424" y="535">3</text>
+          <rect x="520" y="524" width="16" height="16" rx="8" fill="rgba(191,69,32,.20)"/><text x="528" y="535" fill="var(--accent)">4</text>
+          <rect class="step-chip" x="624" y="524" width="16" height="16" rx="8"/><text x="632" y="535">5</text>
+          <rect class="step-chip" x="728" y="524" width="16" height="16" rx="8"/><text x="736" y="535">6</text>
+          <rect class="step-chip" x="832" y="524" width="16" height="16" rx="8"/><text x="840" y="535">7</text>
+          <rect class="step-chip" x="936" y="524" width="16" height="16" rx="8"/><text x="944" y="535">8</text>
+          <rect class="step-chip" x="1040" y="524" width="16" height="16" rx="8"/><text x="1048" y="535">9</text>
+          <rect class="step-chip" x="1144" y="524" width="20" height="16" rx="8"/><text x="1154" y="535">10</text>
+        </g>
+        <g class="legend-text">
+          <text x="230" y="535">Petición</text><text x="334" y="535">Llamada</text><text x="438" y="535">Argumentos</text><text x="542" y="535" fill="var(--accent)">Sanitizer</text><text x="646" y="535">Solo lectura</text><text x="750" y="535">Conexión</text><text x="854" y="535">Ejecución</text><text x="958" y="535">Formato</text><text x="1062" y="535">Resultado</text><text x="1170" y="535">Respuesta</text>
+        </g>
+        <text class="legend-key" x="144" y="556">COLOR</text><rect x="220" y="549" width="16" height="8" rx="2" fill="rgba(156,107,80,.06)" stroke="rgba(156,107,80,.35)"/><text class="legend-text" x="244" y="556">Rechazo · el servidor devuelve el error al LLM sin consultar SQL Server</text>
+        <text class="legend-key" x="144" y="577">FLUJO</text>
+        <line x1="200" y1="573" x2="228" y2="573" stroke="var(--accent)" stroke-width="1.2" marker-end="url(#arrow-accent)"/><text class="legend-text" x="240" y="577">Paso crítico (validación)</text>
+        <line x1="376" y1="573" x2="404" y2="573" stroke="var(--muted)" marker-end="url(#arrow)"/><text class="legend-text" x="416" y="577">Paso secuencial</text>
+        <line x1="520" y1="573" x2="548" y2="573" stroke="var(--muted)" stroke-dasharray="4 3" marker-end="url(#arrow-sm)"/><text class="legend-text" x="560" y="577">Desvío por rechazo</text>
+      </g>
+    </svg>
+    </div>
+    <p class="note">Si SQL Server lanza una excepción en la ejecución, <code>withErrorHandling</code> la captura y <code>formatError</code> devuelve el mensaje al LLM como texto.</p>
+  </div>
+</body>
+</html>
