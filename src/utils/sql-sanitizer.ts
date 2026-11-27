@@ -51,6 +51,12 @@ const FORBIDDEN_KEYWORDS = [
   "WAITFOR",
   // Table hints with the same effect as the isolation levels the SET prefix refuses
   "SERIALIZABLE", "HOLDLOCK", "REPEATABLEREAD",
+  // Table hints that take update, exclusive, table or page locks. UPDLOCK,
+  // XLOCK and TABLOCKX locks are held until the forced rollback, blocking other
+  // sessions' writes (XLOCK and TABLOCKX their reads too). TABLOCK and PAGLOCK
+  // take shared locks that block writers on the whole table or page while the
+  // statement runs. NOLOCK, READPAST, READCOMMITTED and ROWLOCK stay allowed.
+  "UPDLOCK", "XLOCK", "TABLOCK", "TABLOCKX", "PAGLOCK",
 ];
 
 const FORBIDDEN_KEYWORD_SET = new Set(FORBIDDEN_KEYWORDS);

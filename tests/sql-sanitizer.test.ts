@@ -123,6 +123,39 @@ const REPEATABLE_READ_REJECTS: Array<[string, string]> = [
   ["chained second SELECT with the hint", "SELECT 1; SELECT a FROM dbo.t WITH (REPEATABLEREAD)"],
 ];
 
+// Lock hints that take update, exclusive, table or page locks. UPDLOCK, XLOCK
+// and TABLOCKX hold them until the forced rollback; TABLOCK and PAGLOCK block
+// writers on the whole table or page while the statement runs.
+const LOCK_HINT_REJECTS: Array<[string, string]> = [
+  ["UPDLOCK", "SELECT a FROM dbo.t WITH (UPDLOCK) WHERE b = 1"],
+  ["XLOCK", "SELECT a FROM dbo.t WITH (XLOCK) WHERE b = 1"],
+  ["TABLOCK", "SELECT a FROM dbo.t WITH (TABLOCK)"],
+  ["TABLOCKX", "SELECT a FROM dbo.t WITH (TABLOCKX)"],
+  ["PAGLOCK", "SELECT a FROM dbo.t WITH (PAGLOCK)"],
+  ["lowercase", "select a from dbo.t with (updlock)"],
+  ["mixed case", "SELECT a FROM dbo.t WITH (TabLockX)"],
+  ["combined with NOLOCK", "SELECT a FROM dbo.t WITH (NOLOCK, XLOCK)"],
+  ["combined with ROWLOCK", "SELECT a FROM dbo.t WITH (ROWLOCK, UPDLOCK)"],
+  ["no space after the comma", "SELECT a FROM dbo.t WITH(PAGLOCK,READPAST)"],
+  ["several spaces", "SELECT a FROM dbo.t WITH   (   TABLOCK   )"],
+  ["tabs", "SELECT a FROM dbo.t\tWITH\t(\tUPDLOCK\t)"],
+  ["CRLF", "SELECT a\r\nFROM dbo.t WITH (\r\nXLOCK\r\n)\r\nWHERE b = 1"],
+  ["without WITH (legacy syntax)", "SELECT a FROM dbo.t (TABLOCKX)"],
+  ["on a joined table", "SELECT a.x FROM dbo.a a JOIN dbo.b b WITH (UPDLOCK) ON a.id = b.id"],
+  ["inside a CTE", "WITH x AS (SELECT a FROM dbo.t WITH (PAGLOCK)) SELECT a FROM x"],
+  ["inside a subquery", "SELECT (SELECT MAX(a) FROM dbo.t WITH (TABLOCK)) AS m"],
+  ["query-level TABLE HINT", "SELECT a FROM dbo.t OPTION (TABLE HINT(dbo.t, XLOCK))"],
+  ["after a SET prefix", "SET NOCOUNT ON; SELECT a FROM dbo.t WITH (UPDLOCK)"],
+  [
+    "after a READ COMMITTED prefix",
+    "SET TRANSACTION ISOLATION LEVEL READ COMMITTED; SELECT a FROM dbo.t WITH (TABLOCKX)",
+  ],
+  ["block comment inside the hint", "SELECT a FROM dbo.t WITH (/**/UPDLOCK)"],
+  ["line comment before the hint", "SELECT a FROM dbo.t WITH (--x\nXLOCK)"],
+  ["chained second SELECT with ';'", "SELECT 1; SELECT a FROM dbo.t WITH (UPDLOCK)"],
+  ["chained second SELECT without ';'", "SELECT 1 SELECT a FROM dbo.t WITH (TABLOCKX)"],
+];
+
 // Realistic read-only queries the audit workflow relies on. Over-blocking these
 // would break the repository's main purpose.
 const ACCEPTS: Array<[string, string]> = [
@@ -163,6 +196,14 @@ const ACCEPTS: Array<[string, string]> = [
   ["[RepeatableRead] as a bracketed alias", "SELECT 1 AS [RepeatableRead]"],
   ["SET STATISTICS IO prefix", "SET STATISTICS IO ON SELECT COUNT(*) FROM dbo.t"],
   ["table hint", "SELECT a FROM dbo.t WITH (NOLOCK) WHERE b = 1"],
+  ["table hints NOLOCK and READPAST", "SELECT a FROM dbo.t WITH (NOLOCK) JOIN dbo.u WITH (READPAST) ON 1 = 1"],
+  ["table hints ROWLOCK and READCOMMITTED", "SELECT a FROM dbo.t WITH (ROWLOCK, READCOMMITTED)"],
+  ["lock hint names as literals", "SELECT 'UPDLOCK', 'XLOCK', 'TABLOCK', 'TABLOCKX', 'PAGLOCK'"],
+  [
+    "lock hint names as bracketed aliases",
+    "SELECT 1 AS [UpdLock], 2 AS [XLock], 3 AS [TabLock], 4 AS [TabLockX], 5 AS [PagLock]",
+  ],
+  ["columns that only contain the hint names", "SELECT tablock_count, page_lock_count, updlock_x FROM dbo.Stats"],
   ["FOR XML / OPTION", "SELECT name FROM sys.tables FOR XML PATH('') OPTION (RECOMPILE)"],
   ["lowercase", "select top 5 * from sys.dm_os_wait_stats order by wait_time_ms desc"],
   ["column like exp_date (no xp_ match)", "SELECT exp_date FROM dbo.Cards"],
@@ -182,6 +223,10 @@ describe("isReadOnlyQuery: REVIEW §3.1 regressions", () => {
   });
 
   it.each(REPEATABLE_READ_REJECTS)("rejects REPEATABLE READ: %s", (_label, sql) => {
+    expect(isReadOnlyQuery(sql)).toBe(false);
+  });
+
+  it.each(LOCK_HINT_REJECTS)("rejects lock hint: %s", (_label, sql) => {
     expect(isReadOnlyQuery(sql)).toBe(false);
   });
 
@@ -240,6 +285,7 @@ describe("assertReadOnlyQuery", () => {
     expect(() =>
       assertReadOnlyQuery("t", "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ; SELECT 1"),
     ).toThrow(/rejected/);
+    expect(() => assertReadOnlyQuery("t", "SELECT a FROM dbo.t WITH (UPDLOCK)")).toThrow(/rejected/);
     expect(() => assertReadOnlyQuery("t", "SELECT 1")).not.toThrow();
   });
 });
