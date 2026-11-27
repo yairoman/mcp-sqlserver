@@ -745,12 +745,17 @@ export MSSQL_SA_PASSWORD="$(node -e "console.log(require('crypto').randomBytes(1
 # 2. El contenedor (espera al healthcheck)
 docker compose up -d --wait sqlserver
 
-# 3. La suite
-MSSQL_IT_ADMIN_PASSWORD="$MSSQL_SA_PASSWORD" npm run test:integration
+# 3. La suite (lee MSSQL_SA_PASSWORD del entorno)
+npm run test:integration
 
 # 4. Al terminar
 docker compose down -v
 ```
+
+Si ya tenías el contenedor del compose con su volumen, la contraseña SA es la que se fijó la
+primera vez (una nueva no la cambia y el healthcheck fallará): reutiliza esa y **no** uses `-v`
+al bajarlo, que borra el volumen con tus bases de desarrollo. La suite limpia lo suyo sola.
+En PowerShell, el paso 1 es `$env:MSSQL_SA_PASSWORD = "<contraseña>"`.
 
 | Variable                  | Por defecto | Uso                                                              |
 | ------------------------- | ----------- | ---------------------------------------------------------------- |

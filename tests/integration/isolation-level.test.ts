@@ -27,21 +27,16 @@ const rejected = [
 ];
 
 describe("locking isolation levels are rejected", () => {
-  for (const tool of ["execute_select_query", "execute_query"] as const) {
+  for (const tool of ["execute_select_query", "execute_query", "explain_query", "validate_query"] as const) {
     for (const query of rejected) {
       it(`${tool}: ${query}`, async () => {
         const { result, audit } = await captureAudit(() => callTool(config, tool, { database, query }));
-        expect(result.isError).toBe(true);
+        expect(result.isError, result.text).toBe(true);
+        expect(result.text).toContain("rejected");
+        // Rejected by the validator, not by the server: no SQL was sent.
         expect(audit.filter((a) => a.event === "sql")).toEqual([]);
       });
     }
-  }
-
-  for (const tool of ["explain_query", "validate_query"] as const) {
-    it(`${tool}: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`, async () => {
-      const r = await callTool(config, tool, { database, query: rejected[0] });
-      expect(r.isError).toBe(true);
-    });
   }
 });
 
