@@ -13,12 +13,16 @@ import { loadConfig } from "./config.js";
 import { createServer } from "./server.js";
 import { closePool } from "./connection.js";
 
-// Prevent unhandled rejections from crashing the process
+// A fatal error leaves the process in an unknown state (half-open pool, broken
+// transport). Log it to stderr and exit, so the MCP client sees the server die
+// and can restart it, instead of talking to a zombie.
 process.on("uncaughtException", (error) => {
-  console.error("💥 Uncaught exception:", error);
+  console.error("💥 Uncaught exception, exiting:", error);
+  process.exit(1);
 });
 process.on("unhandledRejection", (reason) => {
-  console.error("💥 Unhandled rejection:", reason);
+  console.error("💥 Unhandled rejection, exiting:", reason);
+  process.exit(1);
 });
 
 async function main() {

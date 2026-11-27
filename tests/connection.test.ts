@@ -32,6 +32,10 @@ vi.mock("mssql", () => {
       calls.push("pool:connect");
       return this;
     }
+    on(event: string) {
+      calls.push(`pool:on:${event}`);
+      return this;
+    }
     request() {
       return new FakeRequest();
     }
@@ -80,6 +84,12 @@ describe("executeReadOnlyOnDatabase", () => {
     expect(calls).not.toContain("tx:commit");
   });
 
+  it("attaches an 'error' listener to the pool so a dropped connection is not fatal", async () => {
+    await executeReadOnlyOnDatabase(config, "Tienda", "SELECT 1");
+    expect(calls.indexOf("pool:on:error")).toBeGreaterThan(calls.indexOf("pool:new"));
+    expect(calls.indexOf("pool:on:error")).toBeLessThan(calls.indexOf("pool:connect"));
+  });
+
   it("rolls back when the query fails and rethrows the original error", async () => {
     queryShouldFail = true;
     await expect(executeReadOnlyOnDatabase(config, "Tienda", "SELECT 1")).rejects.toThrow("boom");
@@ -122,6 +132,7 @@ describe("explain_query / validate_query", () => {
     ).rejects.toThrow(/execution plan/);
     expect(calls).toEqual([
       "pool:new",
+      "pool:on:error",
       "pool:connect",
       "batch:USE [Tienda]",
       "batch:SET SHOWPLAN_TEXT ON",
@@ -151,6 +162,7 @@ describe("explain_query / validate_query", () => {
     expect(out).toMatch(/valid/);
     expect(calls).toEqual([
       "pool:new",
+      "pool:on:error",
       "pool:connect",
       "batch:USE [Tienda]",
       "batch:SET PARSEONLY ON",
@@ -171,12 +183,9 @@ describe("execute_select_query / execute_query", () => {
 
   it("execute_query refuses writes in read-only mode even with allowWrite", async () => {
     const { executeQueryHandler } = await import("../src/tools/query/execute-query.js");
-    const out = await executeQueryHandler(config, {
-      database: "Tienda",
-      query: "DELETE FROM t",
-      allowWrite: true,
-    });
-    expect(out).toMatch(/read-only/);
+    await expect(
+      executeQueryHandler(config, { database: "Tienda", query: "DELETE FROM t", allowWrite: true })
+    ).rejects.toThrow(/read-only/);
     expect(calls).not.toContain("pool:connect");
   });
 });

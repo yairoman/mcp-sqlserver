@@ -29,6 +29,20 @@ function buildSqlConfig(config: AppConfig, poolSize?: { min: number; max: number
 }
 
 /**
+ * Create a pool with an 'error' listener. mssql re-emits connection errors on the
+ * pool; with no listener that emit becomes an uncaught exception, and the process
+ * now exits on those. A dropped connection must be logged, not fatal: the failing
+ * request still rejects and the tool reports the error.
+ */
+function createPool(config: AppConfig, poolSize?: { min: number; max: number }): sql.ConnectionPool {
+  const created = new sql.ConnectionPool(buildSqlConfig(config, poolSize));
+  created.on("error", (error: unknown) => {
+    console.error("⚠️ SQL Server connection error:", error instanceof Error ? error.message : error);
+  });
+  return created;
+}
+
+/**
  * Get or create the SQL Server connection pool.
  * Uses lazy initialization — pool is created on first call.
  */
@@ -37,7 +51,7 @@ export async function getPool(config: AppConfig): Promise<sql.ConnectionPool> {
     return pool;
   }
 
-  pool = new sql.ConnectionPool(buildSqlConfig(config));
+  pool = createPool(config);
   await pool.connect();
   return pool;
 }
@@ -129,7 +143,7 @@ export async function withDedicatedConnection<T>(
   config: AppConfig,
   work: (connection: sql.ConnectionPool) => Promise<T>
 ): Promise<T> {
-  const dedicated = new sql.ConnectionPool(buildSqlConfig(config, { min: 0, max: 1 }));
+  const dedicated = createPool(config, { min: 0, max: 1 });
   await dedicated.connect();
   try {
     return await work(dedicated);

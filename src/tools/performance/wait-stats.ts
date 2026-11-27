@@ -56,12 +56,16 @@ export const waitStatsDefinition = {
     type: "object" as const,
     properties: {
       top: {
-        type: "number",
+        type: "integer",
+        minimum: 1,
+        maximum: 500,
         description: "Number of top wait types to return (default: 20)",
         default: 20,
       },
       sampleSeconds: {
-        type: "number",
+        type: "integer",
+        minimum: 0,
+        maximum: 60,
         description:
           "Measure a live window instead of the cumulative total: take a snapshot, wait this many seconds, take another, and report the difference. Recommended 20-30 to diagnose current behaviour. Default 0 = cumulative since restart.",
         default: 0,

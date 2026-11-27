@@ -1,5 +1,7 @@
 import type { AppConfig } from "../config.js";
-import { withErrorHandling } from "../utils/error-handler.js";
+import { formatError } from "../utils/error-handler.js";
+import { jsonSchemaToZod, formatArgIssues, type JsonSchema } from "../utils/args-schema.js";
+import type { z } from "zod";
 
 // Schema tools
 import { listDatabasesDefinition, listDatabasesHandler } from "./schema/list-databases.js";
@@ -103,7 +105,16 @@ export const tools: ToolEntry[] = [
   { definition: compareSchemasDefinition, handler: compareSchemasHandler },
 ];
 
-const toolMap = new Map<string, ToolEntry>(tools.map((t) => [t.definition.name, t]));
+interface CompiledTool extends ToolEntry {
+  argsSchema: z.ZodTypeAny;
+}
+
+const toolMap = new Map<string, CompiledTool>(
+  tools.map((t) => [
+    t.definition.name,
+    { ...t, argsSchema: jsonSchemaToZod(t.definition.inputSchema as JsonSchema) },
+  ])
+);
 
 export function getTool(name: string): ToolEntry | undefined {
   return toolMap.get(name);
@@ -111,7 +122,13 @@ export function getTool(name: string): ToolEntry | undefined {
 
 /**
  * Single entry point to run a tool. The MCP server and the direct-call CLI both
- * go through here, so every invocation gets the same validation and error handling.
+ * go through here, so every invocation gets the same validation and error handling:
+ *
+ * 1. Arguments are parsed with the tool's zod schema (compiled from its inputSchema):
+ *    numbers coerced and clamped, unknown keys rejected. The handler only sees the
+ *    parsed output.
+ * 2. Any thrown error, and any result that starts with "❌", is returned with
+ *    `isError: true` so the client can tell a failure from a result.
  */
 export async function callTool(
   config: AppConfig,
@@ -123,7 +140,19 @@ export async function callTool(
     return { text: `❌ Unknown tool: ${name}`, isError: true };
   }
 
-  const wrapped = withErrorHandling(name, (a) => tool.handler(config, a));
-  const text = await wrapped(args ?? {});
-  return { text, isError: false };
+  const parsed = tool.argsSchema.safeParse(args ?? {});
+  if (!parsed.success) {
+    return {
+      text: `❌ **${name}**: invalid arguments
+${formatArgIssues(parsed.error)}`,
+      isError: true,
+    };
+  }
+
+  try {
+    const text = await tool.handler(config, parsed.data as Record<string, unknown>);
+    return { text, isError: text.trimStart().startsWith("❌") };
+  } catch (error) {
+    return { text: formatError(error, name), isError: true };
+  }
 }

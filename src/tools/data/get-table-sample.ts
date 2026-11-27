@@ -27,7 +27,9 @@ export const getTableSampleDefinition = {
         description: "Table name",
       },
       sampleSize: {
-        type: "number",
+        type: "integer",
+        minimum: 1,
+        maximum: 100,
         description: "Number of sample rows (default: 10)",
         default: 10,
       },
@@ -43,7 +45,7 @@ export async function getTableSampleHandler(
   const database = sanitizeIdentifier(args.database as string);
   const schema = sanitizeIdentifier((args.schema as string) || "dbo");
   const table = sanitizeIdentifier(args.table as string);
-  const sampleSize = Math.min((args.sampleSize as number) || 10, 100);
+  const sampleSize = Math.min(Math.max(Math.trunc(Number(args.sampleSize)) || 10, 1), 100);
   const fullName = qualifiedName(schema, table);
 
   // Get sample rows

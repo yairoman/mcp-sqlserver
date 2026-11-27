@@ -19,7 +19,9 @@ export const findDuplicatesDefinition = {
         description: "Columns to check for duplicates. Example: ['Email', 'Name']",
       },
       minCount: {
-        type: "number",
+        type: "integer",
+        minimum: 2,
+        maximum: 1000000,
         description: "Minimum count to consider a duplicate (default: 2)",
         default: 2,
       },
@@ -36,7 +38,7 @@ export async function findDuplicatesHandler(
   const schema = sanitizeIdentifier((args.schema as string) || "dbo");
   const table = sanitizeIdentifier(args.table as string);
   const columns = (args.columns as string[]).map((c) => sanitizeIdentifier(c));
-  const minCount = (args.minCount as number) || 2;
+  const minCount = Math.min(Math.max(Math.trunc(Number(args.minCount)) || 2, 2), 1_000_000);
 
   const colList = columns.map((c) => quoteIdentifier(c)).join(", ");
   const query = `

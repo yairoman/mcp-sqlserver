@@ -2,6 +2,7 @@ import type { AppConfig } from "../../config.js";
 import { executeQueryOnDatabase, executeReadOnlyOnDatabase } from "../../connection.js";
 import { sanitizeIdentifier, isReadOnlyQuery, validateQuerySafety } from "../../utils/sql-sanitizer.js";
 import { formatQueryResult } from "../../utils/result-formatter.js";
+import { McpToolError } from "../../utils/error-handler.js";
 
 export const executeQueryDefinition = {
   name: "execute_query",
@@ -36,22 +37,26 @@ export async function executeQueryHandler(
   const query = (args.query as string).trim();
   const allowWrite = args.allowWrite === true;
 
-  // Safety checks
+  // Safety checks. Rejections throw, so the caller gets isError: true.
   const warnings = validateQuerySafety(query);
   if (warnings.length > 0) {
-    return `❌ **Query rejected** — dangerous patterns detected:\n${warnings.map((w) => `- ${w}`).join("\n")}`;
+    throw new McpToolError(
+      executeQueryDefinition.name,
+      "Query rejected: dangerous patterns detected.",
+      warnings.join("; ")
+    );
   }
 
   // Writes only when BOTH the server allows them and the caller asks for them.
   const writeMode = allowWrite && !config.readOnly;
 
-  if (!writeMode) {
-    if (!isReadOnlyQuery(query)) {
-      if (config.readOnly) {
-        return "❌ **Query rejected**: Server is in read-only mode (MSSQL_READ_ONLY=true). Only SELECT queries are allowed.";
-      }
-      return "❌ **Query rejected**: Write operations require `allowWrite: true`. Use this flag carefully.";
-    }
+  if (!writeMode && !isReadOnlyQuery(query)) {
+    throw new McpToolError(
+      executeQueryDefinition.name,
+      config.readOnly
+        ? "Query rejected: the server is in read-only mode (MSSQL_READ_ONLY). Only a single SELECT or WITH statement is allowed."
+        : "Query rejected: write operations require `allowWrite: true`. Use this flag carefully."
+    );
   }
 
   const startTime = Date.now();
