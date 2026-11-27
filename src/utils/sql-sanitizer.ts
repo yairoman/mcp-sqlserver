@@ -236,6 +236,24 @@ export function quoteIdentifier(name: string): string {
 }
 
 /**
+ * Bracket-quote a name read from the server (catalog views, DMVs), the way
+ * QUOTENAME does: every `]` is doubled, so the name can never close the bracket
+ * early. Use it for names that did NOT come through sanitizeIdentifier — a
+ * column or database name is created by whoever has DDL rights on the server,
+ * and may contain any character (second-order SQL injection otherwise).
+ */
+export function quoteName(name: string): string {
+  return `[${String(name).replace(/]/g, "]]")}]`;
+}
+
+/**
+ * Quote a value as a Unicode string literal (N'...'), doubling every `'`.
+ */
+export function quoteLiteral(value: string): string {
+  return `N'${String(value).replace(/'/g, "''")}'`;
+}
+
+/**
  * Build a two-part identifier: [schema].[name]
  */
 export function qualifiedName(schema: string, name: string): string {

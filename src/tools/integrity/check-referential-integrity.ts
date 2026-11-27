@@ -1,6 +1,6 @@
 import type { AppConfig } from "../../config.js";
 import { executeQueryOnDatabase } from "../../connection.js";
-import { sanitizeIdentifier } from "../../utils/sql-sanitizer.js";
+import { sanitizeIdentifier, quoteName } from "../../utils/sql-sanitizer.js";
 import { formatObjectList } from "../../utils/result-formatter.js";
 
 export const checkReferentialIntegrityDefinition = {
@@ -58,11 +58,16 @@ export async function checkReferentialIntegrityHandler(
   const violations: Record<string, unknown>[] = [];
 
   for (const fk of fks) {
+    // Every name comes from the catalog: quote it, never paste it raw.
+    const parent = `${quoteName(String(fk.parentSchema))}.${quoteName(String(fk.parentTable))}`;
+    const ref = `${quoteName(String(fk.refSchema))}.${quoteName(String(fk.refTable))}`;
+    const parentCol = quoteName(String(fk.parentColumn));
+    const refCol = quoteName(String(fk.refColumn));
     const checkQuery = `
       SELECT COUNT(*) AS orphanCount
-      FROM [${fk.parentSchema}].[${fk.parentTable}] p
-      LEFT JOIN [${fk.refSchema}].[${fk.refTable}] r ON p.[${fk.parentColumn}] = r.[${fk.refColumn}]
-      WHERE r.[${fk.refColumn}] IS NULL AND p.[${fk.parentColumn}] IS NOT NULL`;
+      FROM ${parent} p
+      LEFT JOIN ${ref} r ON p.${parentCol} = r.${refCol}
+      WHERE r.${refCol} IS NULL AND p.${parentCol} IS NOT NULL`;
 
     try {
       const checkResult = await executeQueryOnDatabase(config, database, checkQuery);

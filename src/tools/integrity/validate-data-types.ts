@@ -1,6 +1,6 @@
 import type { AppConfig } from "../../config.js";
 import { executeQueryOnDatabase } from "../../connection.js";
-import { sanitizeIdentifier, qualifiedName } from "../../utils/sql-sanitizer.js";
+import { sanitizeIdentifier, qualifiedName, quoteName, quoteLiteral } from "../../utils/sql-sanitizer.js";
 import { formatObjectList } from "../../utils/result-formatter.js";
 
 export const validateDataTypesDefinition = {
@@ -49,19 +49,21 @@ export async function validateDataTypesHandler(
 
   for (const col of stringColumns) {
     const colName = col.name as string;
+    // Names come from sys.columns / sys.types: quote them, never paste them raw.
+    const c = quoteName(colName);
 
     const analysisQuery = `
       SELECT
-        '${colName}' AS columnName,
-        '${col.dataType}(${col.max_length})' AS currentType,
+        ${quoteLiteral(colName)} AS columnName,
+        ${quoteLiteral(`${col.dataType}(${col.max_length})`)} AS currentType,
         COUNT(*) AS totalNonNull,
-        SUM(CASE WHEN LTRIM(RTRIM([${colName}])) = '' THEN 1 ELSE 0 END) AS emptyStrings,
-        SUM(CASE WHEN TRY_CAST([${colName}] AS BIGINT) IS NOT NULL AND [${colName}] NOT LIKE '%[^0-9-]%' THEN 1 ELSE 0 END) AS numericValues,
-        SUM(CASE WHEN TRY_CAST([${colName}] AS DATE) IS NOT NULL AND LEN([${colName}]) >= 8 THEN 1 ELSE 0 END) AS dateValues,
-        MAX(LEN([${colName}])) AS maxActualLength,
-        AVG(LEN([${colName}])) AS avgLength
+        SUM(CASE WHEN LTRIM(RTRIM(${c})) = '' THEN 1 ELSE 0 END) AS emptyStrings,
+        SUM(CASE WHEN TRY_CAST(${c} AS BIGINT) IS NOT NULL AND ${c} NOT LIKE '%[^0-9-]%' THEN 1 ELSE 0 END) AS numericValues,
+        SUM(CASE WHEN TRY_CAST(${c} AS DATE) IS NOT NULL AND LEN(${c}) >= 8 THEN 1 ELSE 0 END) AS dateValues,
+        MAX(LEN(${c})) AS maxActualLength,
+        AVG(LEN(${c})) AS avgLength
       FROM ${fullName}
-      WHERE [${colName}] IS NOT NULL`;
+      WHERE ${c} IS NOT NULL`;
 
     try {
       const result = await executeQueryOnDatabase(config, database, analysisQuery);

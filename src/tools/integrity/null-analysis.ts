@@ -1,6 +1,6 @@
 import type { AppConfig } from "../../config.js";
 import { executeQueryOnDatabase } from "../../connection.js";
-import { sanitizeIdentifier, qualifiedName } from "../../utils/sql-sanitizer.js";
+import { sanitizeIdentifier, qualifiedName, quoteName } from "../../utils/sql-sanitizer.js";
 import { formatObjectList } from "../../utils/result-formatter.js";
 
 export const nullAnalysisDefinition = {
@@ -44,9 +44,10 @@ export async function nullAnalysisHandler(
   }
 
   // Build NULL analysis query
+  // Column names come from sys.columns: quote them. The alias is positional
+  // (n0, n1, ...) so it never depends on the name either.
   const nullExpressions = columns.map(
-    (col) =>
-      `SUM(CASE WHEN [${col}] IS NULL THEN 1 ELSE 0 END) AS [${col}_nulls]`
+    (col, i) => `SUM(CASE WHEN ${quoteName(col)} IS NULL THEN 1 ELSE 0 END) AS [n${i}]`
   );
 
   const nullQuery = `
@@ -57,8 +58,8 @@ export async function nullAnalysisHandler(
   const row = nullResult.recordset[0] as Record<string, unknown>;
   const totalRows = row.totalRows as number;
 
-  const analysis = columns.map((col) => {
-    const nullCount = (row[`${col}_nulls`] as number) || 0;
+  const analysis = columns.map((col, i) => {
+    const nullCount = (row[`n${i}`] as number) || 0;
     const pct = totalRows > 0 ? ((nullCount / totalRows) * 100).toFixed(2) : "0.00";
     return {
       column: col,
