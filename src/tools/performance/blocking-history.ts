@@ -1,6 +1,7 @@
 import type { AppConfig } from "../../config.js";
 import { executeQuery, executeQueryOnDatabase } from "../../connection.js";
 import { formatObjectList } from "../../utils/result-formatter.js";
+import { quoteName, quoteLiteral } from "../../utils/sql-sanitizer.js";
 
 /**
  * Databases per UNION ALL batch. The MCP query timeout is 30s and each
@@ -181,7 +182,7 @@ async function singleDatabase(
  * which keeps databases with zero blocking visible in the result.
  */
 function summaryQueryFor(database: string, hours: number): string {
-  const db = quoteIdent(database);
+  const db = quoteName(database);
   return `SELECT ${quoteLiteral(database)} AS databaseName,
       ISNULL(SUM(ws.total_query_wait_time_ms), 0) AS lockWaitMs,
       ISNULL(MAX(ws.max_query_wait_time_ms), 0) AS maxSingleWaitMs,
@@ -213,7 +214,7 @@ async function describeCoverage(
       .map(
         (db) =>
           `SELECT ${quoteLiteral(db)} AS databaseName, actual_state_desc, query_capture_mode_desc, wait_stats_capture_mode_desc
-           FROM ${quoteIdent(db)}.sys.database_query_store_options`
+           FROM ${quoteName(db)}.sys.database_query_store_options`
       )
       .join("\n    UNION ALL\n");
     const result = await executeQuery(config, unionAll);
@@ -274,14 +275,4 @@ function clamp(value: unknown, fallback: number, min: number, max: number): numb
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(Math.max(Math.trunc(n), min), max);
-}
-
-/** Escape a SQL identifier for use inside brackets. Preserves hyphens. */
-function quoteIdent(name: string): string {
-  return `[${name.replace(/]/g, "]]")}]`;
-}
-
-/** Escape a value for use as a SQL string literal. */
-function quoteLiteral(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
 }

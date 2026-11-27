@@ -1,5 +1,6 @@
 import type { AppConfig } from "../../config.js";
 import { executeQuery } from "../../connection.js";
+import { quoteName, quoteLiteral } from "../../utils/sql-sanitizer.js";
 
 /**
  * Databases per UNION ALL batch, to stay inside the 30s query timeout.
@@ -502,7 +503,7 @@ async function checkDiagnosability(
       .map(
         (db) =>
           `SELECT ${quoteLiteral(db)} AS name, actual_state_desc AS state, query_capture_mode_desc AS captureMode
-           FROM ${quoteIdent(db)}.sys.database_query_store_options`
+           FROM ${quoteName(db)}.sys.database_query_store_options`
       )
       .join(" UNION ALL ");
     if (!unionAll) continue;
@@ -597,14 +598,4 @@ function chunk<T>(items: T[], size: number): T[][] {
     out.push(items.slice(i, i + size));
   }
   return out;
-}
-
-/** Escape a SQL identifier for use inside brackets. Preserves hyphens. */
-function quoteIdent(name: string): string {
-  return `[${name.replace(/]/g, "]]")}]`;
-}
-
-/** Escape a value for use as a SQL string literal. */
-function quoteLiteral(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
 }

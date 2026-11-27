@@ -1,5 +1,6 @@
 import type { AppConfig } from "../../config.js";
 import { executeQuery, executeQueryOnDatabase } from "../../connection.js";
+import { quoteName } from "../../utils/sql-sanitizer.js";
 
 /** Compatibility levels a modern engine still accepts, oldest first. */
 const KNOWN_LEVELS = [100, 110, 120, 130, 140, 150, 160, 170];
@@ -250,7 +251,7 @@ async function assessDatabase(
     "## 5. How to apply it",
     "",
     "```sql",
-    `ALTER DATABASE [${database}] SET COMPATIBILITY_LEVEL = ${target};`,
+    `ALTER DATABASE ${quoteName(database)} SET COMPATIBILITY_LEVEL = ${target};`,
     "```",
     "",
     "The statement itself is instant and fully reversible — it changes optimizer behaviour, it does not rewrite data. The risk is not the command, it is the plans it produces. Sequence that actually protects you:",
@@ -264,7 +265,7 @@ async function assessDatabase(
     "**Rollback:**",
     "",
     "```sql",
-    `ALTER DATABASE [${database}] SET COMPATIBILITY_LEVEL = ${current};`,
+    `ALTER DATABASE ${quoteName(database)} SET COMPATIBILITY_LEVEL = ${current};`,
     "```",
     "",
     "If reverting everything for a handful of queries feels wrong, the middle ground is `ALTER DATABASE SCOPED CONFIGURATION SET LEGACY_CARDINALITY_ESTIMATION = ON`: it keeps the new level and its features while restoring the old estimator.",
