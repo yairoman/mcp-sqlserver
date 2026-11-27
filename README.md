@@ -732,6 +732,72 @@ La contraseña `sa` del contenedor de pruebas **no está en el compose**: se lee
 se niega a arrancar si falta. El puerto 1433 se publica solo en `127.0.0.1`. El servicio
 `mcp-server` declara `stdin_open: true` por la misma razón que el `-i` de arriba.
 
+### Pruebas de integración
+
+`npm run test:integration` ejecuta `tests/integration/` contra un SQL Server **real y desechable**:
+el servicio `sqlserver` de este mismo `docker-compose.yml`. Es un script aparte; `npm test` no lo
+incluye y sigue sin necesitar base de datos.
+
+```bash
+# 1. Una contraseña SA de un solo uso (no la guardes en el repo)
+export MSSQL_SA_PASSWORD="$(node -e "console.log(require('crypto').randomBytes(18).toString('base64url')+'aA1!')")"
+
+# 2. El contenedor (espera al healthcheck)
+docker compose up -d --wait sqlserver
+
+# 3. La suite (lee MSSQL_SA_PASSWORD del entorno)
+npm run test:integration
+
+# 4. Al terminar
+docker compose down -v
+```
+
+Si ya tenías el contenedor del compose con su volumen, la contraseña SA es la que se fijó la
+primera vez (una nueva no la cambia y el healthcheck fallará): reutiliza esa y **no** uses `-v`
+al bajarlo, que borra el volumen con tus bases de desarrollo. La suite limpia lo suyo sola.
+En PowerShell, el paso 1 es `$env:MSSQL_SA_PASSWORD = "<contraseña>"`.
+
+| Variable                  | Por defecto | Uso                                                              |
+| ------------------------- | ----------- | ---------------------------------------------------------------- |
+| `MSSQL_IT_ADMIN_PASSWORD` | —           | Contraseña SA del contenedor (o `MSSQL_SA_PASSWORD`). Obligatoria |
+| `MSSQL_IT_ADMIN_USER`     | `sa`        | Login que crea y borra la base y los logins de la prueba          |
+| `MSSQL_IT_HOST`           | `127.0.0.1` | Solo `localhost`, `127.0.0.1` o `::1`                            |
+| `MSSQL_IT_PORT`           | `1433`      | Si mueves el puerto con `MSSQL_HOST_PORT` en el compose           |
+
+**Nunca corre contra una instancia real.** La suite no lee `.env` ni `MSSQL_HOST` (en una máquina
+de desarrollo apuntan a instancias reales) y tiene dos comprobaciones sin bypass, en
+`tests/integration/guard.ts`:
+
+1. **Antes de conectar**: el host tiene que ser literalmente de loopback. Nombres que resuelven a
+   loopback, rangos privados o túneles se rechazan.
+2. **Después de conectar y antes de cualquier DDL**: `SERVERPROPERTY('MachineName')` tiene que ser
+   `mcp-sqlserver-test` (el `hostname:` del servicio en el compose), en Linux y edición Developer o
+   Express. Otro contenedor local que escuche en loopback también se rechaza.
+
+Si falta una variable o falla una comprobación, la ejecución **falla**; no se salta.
+
+**Qué crea y qué borra.** Por ejecución, una base `mcp_it_<aleatorio>` con datos semilla sintéticos
+y dos logins con contraseñas generadas al vuelo (no se escriben en ningún sitio):
+
+- `mcp_it_reader_<aleatorio>`: solo `db_datareader`. Todas las tools se prueban con este login.
+- `mcp_it_writer_<aleatorio>`: `SELECT` y `UPDATE` sobre una sola tabla. Lo usa únicamente la
+  prueba que demuestra que el rollback forzado deshace una escritura que se colara.
+
+Al terminar se borran esos tres nombres exactos, nunca por patrón.
+
+**Qué cubre.**
+
+| Archivo                   | Comprueba                                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------------------- |
+| `integrity-tools.test.ts` | `validate_data_types`, `check_null_analysis` y `check_referential_integrity` con columnas que llevan `]` en el nombre |
+| `read-only.test.ts`       | Escrituras rechazadas antes de llegar al servidor, lectura dentro de una transacción, y que el login de lectura no puede escribir aunque se salte el filtro |
+| `rollback.test.ts`        | La transacción de lectura revierte una escritura, también si el lote falla después          |
+| `max-rows.test.ts`        | `MSSQL_MAX_ROWS` se aplica en el servidor (el driver recibe `maxRows + 1` filas) y no se filtra a la siguiente consulta |
+| `isolation-level.test.ts` | `SERIALIZABLE`, `REPEATABLE READ`, `HOLDLOCK` y compañía rechazados; los niveles permitidos se aplican de verdad |
+
+En CI corre como el job `integration` de `.github/workflows/ci.yml`, con una contraseña SA
+generada y enmascarada en cada ejecución.
+
 ---
 
 ## 🔧 Troubleshooting
@@ -786,15 +852,18 @@ npm install              # Instalar dependencias
 npm run build            # Compilar TypeScript (tsup)
 npm run dev              # Desarrollo con hot reload (tsx watch)
 npm run lint             # Verificar tipos (tsc --noEmit)
-npm test                 # Ejecutar tests (vitest)
+npm test                 # Ejecutar tests unitarios (vitest, sin SQL Server)
+npm run test:integration # Tests contra el SQL Server desechable del compose (ver Docker)
 npm run validate:skills  # Consistencia de .claude/skills/
 ```
 
-> **Nota**: los tests (`tests/`) no necesitan SQL Server: cubren el sanitizador, la configuración
-> y la capa de conexión con `mssql` simulado. Lo que depende del motor se verifica a mano.
+> **Nota**: `npm test` no necesita SQL Server: cubre el sanitizador, la configuración y la capa de
+> conexión con `mssql` simulado. Lo que depende del motor lo cubre `npm run test:integration`
+> contra el contenedor desechable (ver [Pruebas de integración](#pruebas-de-integración)).
 
 Cada pull request pasa por GitHub Actions (`.github/workflows/ci.yml`): `lint`, `test`, `build` y
-`npm audit --omit=dev --audit-level=high` sobre Node 22.
+`npm audit --omit=dev --audit-level=high` sobre Node 22, y en un job aparte (`integration`) la suite
+de integración contra el contenedor del compose.
 
 Para lanzar una tool suelta sin cliente MCP, `src/direct-call.ts` reutiliza el mismo `.env` y pasa
 por el mismo `callTool()` que el servidor, con las mismas validaciones:

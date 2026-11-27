@@ -26,3 +26,34 @@ jobs:
         run: npm run build
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
+
+  # Integration suite against the throwaway SQL Server of docker-compose.yml.
+  # The SA password is generated per run and masked; nothing secret is stored.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Generate a one-off SA password
+        run: |
+          pw="$(node -e "console.log(require('crypto').randomBytes(18).toString('base64url')+'aA1!')")"
+          echo "::add-mask::$pw"
+          echo "MSSQL_SA_PASSWORD=$pw" >> "$GITHUB_ENV"
+      - name: Start SQL Server (docker compose)
+        run: docker compose up -d --wait sqlserver
+      - name: Integration tests
+        env:
+          MSSQL_IT_HOST: 127.0.0.1
+          MSSQL_IT_ADMIN_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
+        run: npm run test:integration
+      - name: SQL Server log on failure
+        if: failure()
+        run: docker compose logs --tail 200 sqlserver
+      - name: Stop SQL Server
+        if: always()
+        run: docker compose down -v
