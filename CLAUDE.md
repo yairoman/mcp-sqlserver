@@ -29,13 +29,16 @@ rechazos poco intuitivos:
 
 2. **Una sola sentencia `SELECT` o `WITH`**, precedida opcionalmente por `SET` inofensivos
    (`NOCOUNT`, `ANSI_NULLS`, `QUOTED_IDENTIFIER`, `STATISTICS IO|TIME|XML|PROFILE`,
-   `SHOWPLAN_*` con `ON|OFF`, y `TRANSACTION ISOLATION LEVEL`). `;` solo se admite al final.
+   `SHOWPLAN_*` con `ON|OFF`, y `TRANSACTION ISOLATION LEVEL` con `READ UNCOMMITTED`,
+   `READ COMMITTED`, `REPEATABLE READ` o `SNAPSHOT`). `SERIALIZABLE` se rechaza: retiene
+   bloqueos de rango hasta el rollback y puede bloquear a otras sesiones. `;` solo se admite
+   al final.
 
 3. **Palabras clave vetadas en el código** (no dentro de literales ni de `[identificadores]`):
    `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `INTO`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `EXEC`,
    `EXECUTE`, `DECLARE`, `SET` (fuera del prefijo), `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVE`, `USE`,
-   `DBCC`, `GRANT`, `REVOKE`, `DENY`, `OPENQUERY`, `OPENROWSET`, `WAITFOR`, `RECEIVE`, `SEND`, y
-   los procedimientos `xp_*`, `sp_configure`, `sp_executesql`, `sp_OA*`. Una columna que se llame
+   `DBCC`, `GRANT`, `REVOKE`, `DENY`, `OPENQUERY`, `OPENROWSET`, `WAITFOR`, `RECEIVE`, `SEND`, las
+   sugerencias de tabla `SERIALIZABLE` y `HOLDLOCK`, y los procedimientos `xp_*`, `sp_configure`, `sp_executesql`, `sp_OA*`. Una columna que se llame
    así hay que escribirla entre corchetes (`[Update]`). Las tablas variables (`DECLARE @t`) y
    `SELECT … INTO` no se pueden usar.
 

@@ -87,6 +87,9 @@ const SERIALIZABLE_REJECTS: Array<[string, string]> = [
   ],
   ["block comment between words", "SET TRANSACTION ISOLATION LEVEL/**/SERIALIZABLE SELECT 1"],
   ["line comment between words", "SET TRANSACTION ISOLATION LEVEL --x\nSERIALIZABLE\nSELECT 1"],
+  ["table hint SERIALIZABLE", "SELECT a FROM dbo.t WITH (SERIALIZABLE) WHERE b = 1"],
+  ["table hint HOLDLOCK", "SELECT a FROM dbo.t WITH (HOLDLOCK) WHERE b = 1"],
+  ["table hint holdlock, lowercase and combined", "select a from dbo.t with (nolock, holdlock)"],
 ];
 
 // Realistic read-only queries the audit workflow relies on. Over-blocking these

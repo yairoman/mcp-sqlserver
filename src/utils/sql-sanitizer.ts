@@ -48,6 +48,8 @@ const FORBIDDEN_KEYWORDS = [
   "RECEIVE", "SEND", "WRITETEXT", "UPDATETEXT",
   // Delays
   "WAITFOR",
+  // Range-lock table hints: same effect as the SERIALIZABLE level the SET prefix refuses
+  "SERIALIZABLE", "HOLDLOCK",
 ];
 
 const FORBIDDEN_KEYWORD_SET = new Set(FORBIDDEN_KEYWORDS);
