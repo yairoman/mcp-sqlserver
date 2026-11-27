@@ -1,5 +1,6 @@
 import sql from "mssql";
 import type { AppConfig } from "./config.js";
+import { sanitizeIdentifier } from "./utils/sql-sanitizer.js";
 
 let pool: sql.ConnectionPool | null = null;
 
@@ -145,12 +146,4 @@ export async function closePool(): Promise<void> {
     await pool.close();
     pool = null;
   }
-}
-
-/**
- * Sanitize a SQL identifier (database, table, column name).
- * Removes brackets and dangerous characters.
- */
-export function sanitizeIdentifier(name: string): string {
-  return name.replace(/[\[\]'";\-\-\/\*]/g, "").trim();
 }

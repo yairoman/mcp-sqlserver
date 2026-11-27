@@ -23,7 +23,7 @@ usando ese servidor; los informes viven en `docs/`, que no se versiona.
   `zod` (validación de configuración), `dotenv`.
 - **Build:** `tsup` (`tsup.config.ts`: entrada `src/index.ts`, salida `dist/`, ESM, con shebang).
 - **Desarrollo:** `tsx` (ejecución directa de TypeScript).
-- **Pruebas:** `vitest` (sin archivos de test todavía).
+- **Pruebas:** `vitest`, en `tests/` (sanitizador, configuración, capa de conexión simulada).
 - **Tipos/lint:** `tsc --noEmit`. No hay ESLint ni Prettier configurados.
 - **Gestor de paquetes:** npm (`package-lock.json`).
 - **Estructura:**
@@ -66,9 +66,8 @@ npm run validate:skills  # consistencia de .claude/skills/ (tras editar un skill
 
 - **Resultado observado:** ninguno. Los tres comandos quedan **no verificados** porque el
   entorno no tiene Node.js/npm (`node: command not found`).
-- **Resultado esperado según el README:** el proyecto no tiene archivos de test, así que
-  `npm test` termina con `No test files found` y **código de salida 1**. Es el estado actual, no
-  un fallo de instalación. Una tarea que añada tests debe contar con esto.
+- Los tests no necesitan SQL Server: la capa `mssql` se simula con `vi.mock`. Lo que depende
+  del motor (planes, PARSEONLY, rollback real) se verifica a mano contra una instancia.
 - No existe `vitest.config.*`; vitest usa su configuración por defecto.
 
 ## Levantar en local

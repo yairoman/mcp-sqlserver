@@ -772,8 +772,8 @@ npm test                 # Ejecutar tests (vitest)
 npm run validate:skills  # Consistencia de .claude/skills/
 ```
 
-> **Nota**: el proyecto todavía no tiene archivos de test, así que `npm test` termina con
-> `No test files found` y código de salida 1. Es lo esperado hoy, no un fallo de instalación.
+> **Nota**: los tests (`tests/`) no necesitan SQL Server: cubren el sanitizador, la configuración
+> y la capa de conexión con `mssql` simulado. Lo que depende del motor se verifica a mano.
 
 Para lanzar una tool suelta sin cliente MCP, `src/direct-call.ts` reutiliza el mismo `.env` y pasa
 por el mismo `callTool()` que el servidor, con las mismas validaciones:
