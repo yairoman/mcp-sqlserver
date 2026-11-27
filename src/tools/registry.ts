@@ -2,6 +2,7 @@ import type { AppConfig } from "../config.js";
 import { formatError } from "../utils/error-handler.js";
 import { jsonSchemaToZod, formatArgIssues, type JsonSchema } from "../utils/args-schema.js";
 import type { z } from "zod";
+import { withAuditContext, auditToolCall } from "../utils/audit.js";
 
 // Schema tools
 import { listDatabasesDefinition, listDatabasesHandler } from "./schema/list-databases.js";
@@ -129,6 +130,7 @@ export function getTool(name: string): ToolEntry | undefined {
  *    parsed output.
  * 2. Any thrown error, and any result that starts with "❌", is returned with
  *    `isError: true` so the client can tell a failure from a result.
+ * 3. The call and every SQL it sends are written to the stderr audit log.
  */
 export async function callTool(
   config: AppConfig,
@@ -149,10 +151,16 @@ ${formatArgIssues(parsed.error)}`,
     };
   }
 
+  const start = Date.now();
+  let result: ToolCallResult;
   try {
-    const text = await tool.handler(config, parsed.data as Record<string, unknown>);
-    return { text, isError: text.trimStart().startsWith("❌") };
+    const text = await withAuditContext(name, () =>
+      tool.handler(config, parsed.data as Record<string, unknown>)
+    );
+    result = { text, isError: text.trimStart().startsWith("❌") };
   } catch (error) {
-    return { text: formatError(error, name), isError: true };
+    result = { text: formatError(error, name), isError: true };
   }
+  auditToolCall(config.auditLog, name, { ok: !result.isError, ms: Date.now() - start });
+  return result;
 }

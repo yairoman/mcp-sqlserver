@@ -1,6 +1,7 @@
 import sql from "mssql";
 import type { AppConfig } from "./config.js";
 import { sanitizeIdentifier } from "./utils/sql-sanitizer.js";
+import { auditSql, countRows } from "./utils/audit.js";
 
 let pool: sql.ConnectionPool | null = null;
 
@@ -57,6 +58,52 @@ export async function getPool(config: AppConfig): Promise<sql.ConnectionPool> {
 }
 
 /**
+ * Run one SQL call and write its audit line (tool, database, SQL hash, rows).
+ */
+async function audited<T extends { recordsets?: unknown }>(
+  config: AppConfig,
+  database: string,
+  sqlText: string,
+  run: () => Promise<T>
+): Promise<T> {
+  const start = Date.now();
+  try {
+    const result = await run();
+    auditSql(config.auditLog, {
+      database,
+      sql: sqlText,
+      rows: countRows(result),
+      ms: Date.now() - start,
+      ok: true,
+    });
+    return result;
+  } catch (error) {
+    auditSql(config.auditLog, { database, sql: sqlText, rows: null, ms: Date.now() - start, ok: false });
+    throw error;
+  }
+}
+
+function bindParams(request: sql.Request, params?: Record<string, unknown>): void {
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      request.input(key, value);
+    }
+  }
+}
+
+async function runQuery(
+  config: AppConfig,
+  database: string,
+  query: string,
+  params?: Record<string, unknown>
+): Promise<sql.IResult<Record<string, unknown>>> {
+  const p = await getPool(config);
+  const request = p.request();
+  bindParams(request, params);
+  return audited(config, database, query, () => request.query(query));
+}
+
+/**
  * Execute a SQL query with optional parameters.
  * Returns the recordset result.
  */
@@ -65,16 +112,7 @@ export async function executeQuery(
   query: string,
   params?: Record<string, unknown>
 ): Promise<sql.IResult<Record<string, unknown>>> {
-  const p = await getPool(config);
-  const request = p.request();
-
-  if (params) {
-    for (const [key, value] of Object.entries(params)) {
-      request.input(key, value);
-    }
-  }
-
-  return request.query(query);
+  return runQuery(config, config.database, query, params);
 }
 
 /**
@@ -87,8 +125,9 @@ export async function executeQueryOnDatabase(
   params?: Record<string, unknown>
 ): Promise<sql.IResult<Record<string, unknown>>> {
   const sanitizedDb = sanitizeIdentifier(database);
-  const fullQuery = `USE [${sanitizedDb}];\n${query}`;
-  return executeQuery(config, fullQuery, params);
+  const fullQuery = `USE [${sanitizedDb}];
+${query}`;
+  return runQuery(config, sanitizedDb, fullQuery, params);
 }
 
 /**
@@ -116,12 +155,8 @@ export async function executeReadOnlyOnDatabase(
 
   try {
     const request = new sql.Request(transaction);
-    if (params) {
-      for (const [key, value] of Object.entries(params)) {
-        request.input(key, value);
-      }
-    }
-    return await request.query(fullQuery);
+    bindParams(request, params);
+    return await audited(config, sanitizedDb, fullQuery, () => request.query(fullQuery));
   } finally {
     try {
       await transaction.rollback();
@@ -132,21 +167,33 @@ export async function executeReadOnlyOnDatabase(
   }
 }
 
+/** Send one batch on a dedicated connection (see withDedicatedConnection). */
+export type BatchRunner = (sqlText: string) => Promise<sql.IResult<Record<string, unknown>>>;
+
 /**
- * Run `work` on a dedicated single-connection pool that is closed afterwards.
+ * Run `work` on a dedicated single-connection pool, switched to `database`,
+ * that is closed afterwards.
  *
  * Use it for connection-scoped SET options (SHOWPLAN, PARSEONLY): every step is
- * sent as its own batch over the same physical connection, and closing the pool
+ * sent with `.batch()` (a plain SQL batch, not sp_executesql, so a SET applies to
+ * the connection) over the same physical connection, and closing the pool
  * guarantees none of that state leaks into the shared pool.
  */
 export async function withDedicatedConnection<T>(
   config: AppConfig,
-  work: (connection: sql.ConnectionPool) => Promise<T>
+  database: string,
+  work: (batch: BatchRunner) => Promise<T>
 ): Promise<T> {
+  const sanitizedDb = sanitizeIdentifier(database);
   const dedicated = createPool(config, { min: 0, max: 1 });
   await dedicated.connect();
+  const batch: BatchRunner = (sqlText) =>
+    audited(config, sanitizedDb, sqlText, () =>
+      dedicated.request().batch(sqlText) as Promise<sql.IResult<Record<string, unknown>>>
+    );
   try {
-    return await work(dedicated);
+    await batch(`USE [${sanitizedDb}]`);
+    return await work(batch);
   } finally {
     await dedicated.close();
   }

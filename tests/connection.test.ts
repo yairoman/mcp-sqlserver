@@ -189,3 +189,48 @@ describe("execute_select_query / execute_query", () => {
     expect(calls).not.toContain("pool:connect");
   });
 });
+
+describe("audit log", () => {
+  it("writes one JSON line per SQL to stderr with tool, database, SQL hash and rows, never the SQL text", async () => {
+    const { withAuditContext, sqlHash } = await import("../src/utils/audit.js");
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    try {
+      await withAuditContext("execute_select_query", () =>
+        executeReadOnlyOnDatabase(config, "Tienda", "SELECT secret_column FROM t")
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    const records = lines.map((l) => JSON.parse(l));
+    const sqlLine = records.find((r) => r.event === "sql");
+    expect(sqlLine).toMatchObject({
+      audit: true,
+      tool: "execute_select_query",
+      database: "Tienda",
+      sqlSha256: sqlHash("USE [Tienda];\nSELECT secret_column FROM t"),
+      rows: 0,
+      ok: true,
+    });
+    expect(lines.join("")).not.toMatch(/secret_column/);
+  });
+
+  it("is silent when MSSQL_AUDIT_LOG=false", async () => {
+    const quiet = loadConfig({
+      MSSQL_HOST: "localhost",
+      MSSQL_USER: "u",
+      MSSQL_PASSWORD: "p",
+      MSSQL_AUDIT_LOG: "false",
+    } as NodeJS.ProcessEnv);
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await executeReadOnlyOnDatabase(quiet, "Tienda", "SELECT 1");
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

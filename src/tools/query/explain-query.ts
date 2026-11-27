@@ -33,13 +33,12 @@ export async function explainQueryHandler(
   // Validate BEFORE touching the server. No fallback ever executes the query.
   assertReadOnlyQuery(explainQueryDefinition.name, query);
 
-  const planLines = await withDedicatedConnection(config, async (conn) => {
+  const planLines = await withDedicatedConnection(config, database, async (batch) => {
     // Each step is its own batch (.batch → sp_executesql is NOT used), so the
     // SET applies to the connection and SHOWPLAN is the only statement in its batch.
-    await conn.request().batch(`USE [${database}]`);
-    await conn.request().batch("SET SHOWPLAN_TEXT ON");
+    await batch("SET SHOWPLAN_TEXT ON");
     try {
-      const result = await conn.request().batch(query);
+      const result = await batch(query);
       const lines: string[] = [];
       const recordsets = (result.recordsets ?? []) as unknown as Record<string, unknown>[][];
       for (const recordset of recordsets) {
@@ -52,7 +51,7 @@ export async function explainQueryHandler(
       }
       return lines;
     } finally {
-      await conn.request().batch("SET SHOWPLAN_TEXT OFF");
+      await batch("SET SHOWPLAN_TEXT OFF");
     }
   });
 

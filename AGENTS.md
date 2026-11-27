@@ -18,7 +18,7 @@ usando ese servidor; los informes viven en `docs/`, que no se versiona.
 ## Stack
 
 - **Lenguaje:** TypeScript (`strict`, ESM: `"type": "module"`), destino `node20`.
-- **Runtime:** Node.js `>=20` (`engines` en `package.json`; el `Dockerfile` usa `node:20-alpine`).
+- **Runtime:** Node.js `>=22` LTS (`engines` en `package.json`; el `Dockerfile` usa `node:22-alpine` y `USER node`).
 - **Dependencias:** `@modelcontextprotocol/sdk` (transporte STDIO), `mssql` (driver y pool),
   `zod` (validación de configuración), `dotenv`.
 - **Build:** `tsup` (`tsup.config.ts`: entrada `src/index.ts`, salida `dist/`, ESM, con shebang).
@@ -123,8 +123,8 @@ npx tsx src/index.ts     # sin compilar; es la variante que usa .mcp.json
 - **Puertas laterales** — cualquier vía de ejecución fuera del servidor (scripts, CLIs) tiene que
   pasar por `callTool()` de `src/tools/registry.ts`. No reintroducir utilidades que ejecuten SQL
   sin el validador (como el antiguo `run-query.mjs`).
-- **`docker-compose.yml`** — contiene la contraseña `sa` del entorno de pruebas; es solo para
-  desarrollo local.
+- **`docker-compose.yml`** — solo para desarrollo local. La contraseña `sa` del contenedor sale de
+  `MSSQL_SA_PASSWORD` en el `.env` local; no volver a escribirla en el compose.
 - **`.claude/skills/`** — base de conocimiento versionada con registro y numeración de reglas
   (`R-nn`); editar sin correr `validate:skills` deja referencias inconsistentes.
 

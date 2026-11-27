@@ -30,6 +30,7 @@ const configSchema = z.object({
   encrypt: onUnlessExplicitFalse,
   trustServerCertificate: offUnlessExplicitTrue,
   readOnly: onUnlessExplicitFalse,
+  auditLog: onUnlessExplicitFalse,
 
   // Limits
   maxRows: z.coerce.number().int().positive().default(1000),
@@ -53,6 +54,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     encrypt: env.MSSQL_ENCRYPT,
     trustServerCertificate: env.MSSQL_TRUST_SERVER_CERTIFICATE,
     readOnly: env.MSSQL_READ_ONLY,
+    auditLog: env.MSSQL_AUDIT_LOG,
     maxRows: env.MSSQL_MAX_ROWS,
     queryTimeout: env.MSSQL_QUERY_TIMEOUT,
     connectionTimeout: env.MSSQL_CONNECTION_TIMEOUT,

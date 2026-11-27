@@ -33,13 +33,12 @@ export async function validateQueryHandler(
   assertReadOnlyQuery(validateQueryDefinition.name, query);
 
   try {
-    await withDedicatedConnection(config, async (conn) => {
-      await conn.request().batch(`USE [${database}]`);
-      await conn.request().batch("SET PARSEONLY ON");
+    await withDedicatedConnection(config, database, async (batch) => {
+      await batch("SET PARSEONLY ON");
       try {
-        await conn.request().batch(query);
+        await batch(query);
       } finally {
-        await conn.request().batch("SET PARSEONLY OFF");
+        await batch("SET PARSEONLY OFF");
       }
     });
     return `✅ **Query syntax is valid.**\n\n\`\`\`sql\n${query}\n\`\`\``;

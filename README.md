@@ -4,7 +4,7 @@
 
 ## 📋 Requisitos
 
-- **Node.js >= 20** — verifica con `node -v`
+- **Node.js >= 22** (LTS) — verifica con `node -v`
 - Acceso de red a una instancia de SQL Server y credenciales de un usuario SQL
 
 ## 🚀 Quick Start
@@ -420,7 +420,8 @@ El LLM lo resume: `PedidoId` es identidad y PK, `ClienteId` es la FK hacia `Clie
 **Tú:** «Revisa el plan de esta consulta, la usa el informe de envíos y tarda mucho:
 `SELECT PedidoId, Total FROM dbo.Pedidos WHERE YEAR(FechaPedido) = 2026 AND Estado = 'ENVIADO'`»
 
-**El LLM llama a** `explain_query` (plan estimado, no ejecuta la consulta):
+**El LLM llama a** `explain_query` (plan estimado: valida que sea un `SELECT`/`WITH` y activa
+`SHOWPLAN_TEXT` en su propio lote, así que la consulta no se ejecuta):
 
 ```json
 {
@@ -629,6 +630,7 @@ deja como **propuesta** para que una persona la revise: antes de crearlo convien
 | `MSSQL_ENCRYPT`                  | `true`      | Encriptar conexión. Solo `false` explícito la desactiva |
 | `MSSQL_TRUST_SERVER_CERTIFICATE` | `false`     | Aceptar el certificado sin validarlo. Solo `true` explícito lo activa |
 | `MSSQL_READ_ONLY`                | `true`      | Modo solo lectura. Solo `false` explícito lo desactiva |
+| `MSSQL_AUDIT_LOG`                | `true`      | Bitácora de auditoría en stderr. Solo `false` explícito la desactiva |
 | `MSSQL_MAX_ROWS`                 | `1000`      | Máximo de filas por consulta |
 | `MSSQL_QUERY_TIMEOUT`            | `30000`     | Timeout de queries (ms)      |
 | `MSSQL_CONNECTION_TIMEOUT`       | `15000`     | Timeout de conexión (ms)     |
@@ -644,11 +646,24 @@ de `docker-compose`), ponlo a `true` de forma explícita en tu `.env`.
 
 ## 🔒 Seguridad
 
-- **Read-only por defecto**: Solo queries SELECT permitidos
-- **Validación de queries**: Detecta patrones peligrosos (DROP, xp_cmdshell, etc.)
-- **Sanitización de identificadores**: Previene SQL injection
-- **Timeouts configurables**: Previene queries indefinidos
-- **Límite de filas**: Previene descarga accidental de tablas enormes
+- **Solo lectura por defecto, en varias capas**: `MSSQL_READ_ONLY` falla en cerrado; las tools que
+  reciben SQL o filtros pasan por el validador (una sola sentencia `SELECT`/`WITH`, sin DML, DDL,
+  `EXEC`, `DECLARE` ni control de transacciones) y se ejecutan dentro de una transacción que
+  siempre se revierte. Ninguna de estas capas sustituye al login: **el control real es un login
+  de mínimo privilegio** (ver abajo). Con `sa`, un error en el filtro equivale a control total.
+- **`explain_query` y `validate_query` no ejecutan la consulta**: la validan primero y activan
+  `SHOWPLAN_TEXT` / `PARSEONLY` en su propio lote, sobre una conexión dedicada que se cierra al
+  terminar.
+- **Sin SQL libre en `read_table_data`**: los filtros son estructurados y los valores viajan como
+  parámetros.
+- **Validación de argumentos**: cada llamada se valida contra el esquema de la tool antes de
+  ejecutarse (numéricos acotados, claves desconocidas rechazadas). Los fallos llegan al cliente
+  con `isError: true`.
+- **Sanitización de identificadores**: lista blanca única; un nombre inválido se rechaza, nunca
+  se recorta en silencio.
+- **Bitácora de auditoría**: una línea JSON por llamada y por sentencia en stderr, con tool, base,
+  SHA-256 del SQL (no el SQL) y filas devueltas. Se desactiva con `MSSQL_AUDIT_LOG=false`.
+- **Timeouts configurables** y **límite de filas**.
 
 El recorrido completo de una consulta (tool, `sql-sanitizer`, `MSSQL_READ_ONLY`, pool `mssql` y SQL Server, con la rama de rechazo) está en el diagrama [Flujo de una consulta](assets/diagramas/flujo-consulta.html) ([SVG](assets/diagramas/flujo-consulta.svg)).
 
@@ -693,14 +708,15 @@ Qué hace el servidor además del login:
 docker build -t mcp-sqlserver .
 docker run --rm -i \
   -e MSSQL_HOST=host.docker.internal \
-  -e MSSQL_USER=sa \
-  -e MSSQL_PASSWORD=yourpassword \
+  -e MSSQL_USER=mcp_reader \
+  -e MSSQL_PASSWORD="$MSSQL_PASSWORD" \
   mcp-sqlserver
 ```
 
 > **El flag `-i` es obligatorio.** El servidor habla MCP por STDIO: sin stdin abierto lee EOF y se
 > cierra inmediatamente. La imagen no incluye el `.env` (no se copia al contexto de build), así que
-> las credenciales se pasan siempre con `-e`.
+> las credenciales se pasan siempre con `-e`. La imagen usa Node 22 LTS y corre como el usuario
+> sin privilegios `node`.
 
 ### Entorno completo de pruebas
 
@@ -711,8 +727,10 @@ Si no tienes un SQL Server a mano, el `docker-compose.yml` levanta uno de desarr
 docker compose up --build
 ```
 
-Las credenciales del entorno de pruebas están en el propio compose. El servicio `mcp-server`
-declara `stdin_open: true` por la misma razón que el `-i` de arriba.
+La contraseña `sa` del contenedor de pruebas **no está en el compose**: se lee de
+`MSSQL_SA_PASSWORD` en tu `.env` local (no versionado; ver `.env.example`), y `docker compose`
+se niega a arrancar si falta. El puerto 1433 se publica solo en `127.0.0.1`. El servicio
+`mcp-server` declara `stdin_open: true` por la misma razón que el `-i` de arriba.
 
 ---
 
@@ -774,6 +792,9 @@ npm run validate:skills  # Consistencia de .claude/skills/
 
 > **Nota**: los tests (`tests/`) no necesitan SQL Server: cubren el sanitizador, la configuración
 > y la capa de conexión con `mssql` simulado. Lo que depende del motor se verifica a mano.
+
+Cada pull request pasa por GitHub Actions (`.github/workflows/ci.yml`): `lint`, `test`, `build` y
+`npm audit --omit=dev --audit-level=high` sobre Node 22.
 
 Para lanzar una tool suelta sin cliente MCP, `src/direct-call.ts` reutiliza el mismo `.env` y pasa
 por el mismo `callTool()` que el servidor, con las mismas validaciones:
