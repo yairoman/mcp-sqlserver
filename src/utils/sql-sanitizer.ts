@@ -17,12 +17,13 @@ const COMMENT_PATTERN = /--|\/\*|\*\//;
 /**
  * Leading SET statements that may precede the SELECT / WITH.
  *
- * SERIALIZABLE is deliberately absent: it holds key-range locks until the
- * forced rollback, so a long read can block other sessions' writes for its
- * whole duration. Without a match here the body starts with SET and is rejected.
+ * SERIALIZABLE and REPEATABLE READ are deliberately absent: they hold locks
+ * on what was read (key ranges, or every row read) until the forced rollback,
+ * so a long read can block other sessions' writes for its whole duration.
+ * Without a match here the body starts with SET and is rejected.
  */
 const ALLOWED_SET_PREFIX =
-  /^SET\s+(?:(?:NOCOUNT|ANSI_NULLS|QUOTED_IDENTIFIER|STATISTICS\s+(?:IO|TIME|XML|PROFILE)|SHOWPLAN_(?:TEXT|ALL|XML))\s+(?:ON|OFF)|TRANSACTION\s+ISOLATION\s+LEVEL\s+(?:READ\s+UNCOMMITTED|READ\s+COMMITTED|REPEATABLE\s+READ|SNAPSHOT))\s*(?:;\s*|\s+|$)/i;
+  /^SET\s+(?:(?:NOCOUNT|ANSI_NULLS|QUOTED_IDENTIFIER|STATISTICS\s+(?:IO|TIME|XML|PROFILE)|SHOWPLAN_(?:TEXT|ALL|XML))\s+(?:ON|OFF)|TRANSACTION\s+ISOLATION\s+LEVEL\s+(?:READ\s+UNCOMMITTED|READ\s+COMMITTED|SNAPSHOT))\s*(?:;\s*|\s+|$)/i;
 
 /**
  * Keywords that never belong in a read-only query. Matched per token (see
@@ -48,8 +49,8 @@ const FORBIDDEN_KEYWORDS = [
   "RECEIVE", "SEND", "WRITETEXT", "UPDATETEXT",
   // Delays
   "WAITFOR",
-  // Range-lock table hints: same effect as the SERIALIZABLE level the SET prefix refuses
-  "SERIALIZABLE", "HOLDLOCK",
+  // Table hints with the same effect as the isolation levels the SET prefix refuses
+  "SERIALIZABLE", "HOLDLOCK", "REPEATABLEREAD",
 ];
 
 const FORBIDDEN_KEYWORD_SET = new Set(FORBIDDEN_KEYWORDS);
