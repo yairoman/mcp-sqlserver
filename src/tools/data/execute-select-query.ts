@@ -36,7 +36,11 @@ export async function executeSelectQueryHandler(
   assertReadOnlyQuery(executeSelectQueryDefinition.name, query);
 
   const startTime = Date.now();
-  const result = await executeReadOnlyOnDatabase(config, database, query);
+  // maxRows + 1 rows are fetched so the formatter can tell "exactly maxRows"
+  // from "more than maxRows"; the server stops producing rows after that.
+  const result = await executeReadOnlyOnDatabase(config, database, query, undefined, {
+    rowLimit: config.maxRows + 1,
+  });
   const elapsed = Date.now() - startTime;
 
   const columns =
@@ -46,6 +50,7 @@ export async function executeSelectQueryHandler(
     columns,
     result.recordset as Record<string, unknown>[],
     config.maxRows,
-    elapsed
+    elapsed,
+    { serverCapped: true }
   );
 }

@@ -63,7 +63,11 @@ export async function executeQueryHandler(
   // Read path runs inside a transaction that is always rolled back.
   const result = writeMode
     ? await executeQueryOnDatabase(config, database, query)
-    : await executeReadOnlyOnDatabase(config, database, query);
+    : await executeReadOnlyOnDatabase(config, database, query, undefined, {
+        // Cut on the server (maxRows + 1 tells "exactly" from "more than").
+        // Not in write mode: SET ROWCOUNT would also cap UPDATE/DELETE.
+        rowLimit: config.maxRows + 1,
+      });
   const elapsed = Date.now() - startTime;
 
   // If it returned rows (SELECT)
@@ -73,7 +77,8 @@ export async function executeQueryHandler(
       columns,
       result.recordset as Record<string, unknown>[],
       config.maxRows,
-      elapsed
+      elapsed,
+      { serverCapped: !writeMode }
     );
   }
 

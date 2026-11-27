@@ -8,11 +8,15 @@ export function formatQueryResult(
   columns: string[],
   rows: Record<string, unknown>[],
   maxRows: number,
-  executionTimeMs: number
+  executionTimeMs: number,
+  options?: { serverCapped?: boolean }
 ): string {
   const truncated = rows.length > maxRows;
   const displayRows = truncated ? rows.slice(0, maxRows) : rows;
-  const totalRows = rows.length;
+  // When the server stopped at maxRows + 1, rows.length is not the real total:
+  // it only proves that more rows exist.
+  const serverCapped = options?.serverCapped === true && truncated;
+  const totalRows = serverCapped ? displayRows.length : rows.length;
 
   const result: QueryResult = {
     columns,
@@ -25,11 +29,18 @@ export function formatQueryResult(
   const parts: string[] = [];
 
   // Header
-  parts.push(`**Query Results** (${totalRows} rows, ${executionTimeMs}ms)`);
-  if (truncated) {
+  if (serverCapped) {
+    parts.push(`**Query Results** (first ${maxRows} rows, ${executionTimeMs}ms)`);
     parts.push(
-      `⚠️ Results truncated to ${maxRows} rows (total: ${totalRows})`
+      `⚠️ Results truncated to ${maxRows} rows (MSSQL_MAX_ROWS). The server stopped there, so the total is unknown: add TOP / WHERE / ORDER BY to narrow the query, or COUNT(*) to size it.`
     );
+  } else {
+    parts.push(`**Query Results** (${totalRows} rows, ${executionTimeMs}ms)`);
+    if (truncated) {
+      parts.push(
+        `⚠️ Results truncated to ${maxRows} rows (total: ${totalRows})`
+      );
+    }
   }
 
   // Table format if small enough

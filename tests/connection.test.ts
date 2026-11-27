@@ -181,6 +181,46 @@ describe("execute_select_query / execute_query", () => {
     expect(calls).toContain("tx:rollback");
   });
 
+  it("execute_select_query caps rows on the server and lifts the cap before rolling back", async () => {
+    const { executeSelectQueryHandler } = await import("../src/tools/data/execute-select-query.js");
+    await executeSelectQueryHandler(config, { database: "Tienda", query: "SELECT * FROM t" });
+    const limit = config.maxRows + 1;
+    expect(calls).toContain(`query:USE [Tienda];\nSET ROWCOUNT ${limit};\nSELECT * FROM t`);
+    const reset = calls.indexOf("query:SET ROWCOUNT 0");
+    expect(reset).toBeGreaterThan(-1);
+    expect(reset).toBeLessThan(calls.indexOf("tx:rollback"));
+  });
+
+  it("lifts the row cap even when the query fails", async () => {
+    queryShouldFail = true;
+    await expect(
+      executeReadOnlyOnDatabase(config, "Tienda", "SELECT * FROM t", undefined, { rowLimit: 5 })
+    ).rejects.toThrow("boom");
+    expect(calls).toContain("query:SET ROWCOUNT 0");
+    expect(calls).toContain("tx:rollback");
+  });
+
+  it("execute_query caps rows on the server in read mode", async () => {
+    const { executeQueryHandler } = await import("../src/tools/query/execute-query.js");
+    await executeQueryHandler(config, { database: "Tienda", query: "SELECT * FROM t" });
+    expect(calls).toContain(`query:USE [Tienda];\nSET ROWCOUNT ${config.maxRows + 1};\nSELECT * FROM t`);
+    expect(calls).toContain("query:SET ROWCOUNT 0");
+  });
+
+  it("does not cap rows unless asked (fixed-shape tools keep their own TOP)", async () => {
+    await executeReadOnlyOnDatabase(config, "Tienda", "SELECT 1");
+    expect(calls.some((c) => c.includes("ROWCOUNT"))).toBe(false);
+  });
+
+  it("rejects a rowLimit that is not a positive integer", async () => {
+    for (const rowLimit of [0, -1, 1.5, Number.NaN]) {
+      await expect(
+        executeReadOnlyOnDatabase(config, "Tienda", "SELECT 1", undefined, { rowLimit })
+      ).rejects.toThrow(/rowLimit/);
+    }
+    expect(calls).not.toContain("tx:begin");
+  });
+
   it("execute_query refuses writes in read-only mode even with allowWrite", async () => {
     const { executeQueryHandler } = await import("../src/tools/query/execute-query.js");
     await expect(
