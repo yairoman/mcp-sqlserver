@@ -69,6 +69,51 @@ const MORE_REJECTS: Array<[string, string]> = [
   ["ODBC function escape", "SELECT {fn CURDATE()}"],
 ];
 
+// SERIALIZABLE keeps range locks until the forced rollback and can block other
+// sessions for the whole query. Rejected as a SET prefix and as a table hint.
+const SERIALIZABLE_REJECTS: Array<[string, string]> = [
+  ["SET SERIALIZABLE", "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE SELECT 1"],
+  ["SET SERIALIZABLE with ';'", "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; SELECT 1"],
+  ["lowercase", "set transaction isolation level serializable; select 1"],
+  ["mixed case", "Set Transaction Isolation Level SeRiAlIzAbLe SELECT 1"],
+  ["tabs", "SET\tTRANSACTION\tISOLATION\tLEVEL\tSERIALIZABLE\tSELECT 1"],
+  ["newlines", "SET TRANSACTION\nISOLATION LEVEL\nSERIALIZABLE\nSELECT 1"],
+  ["CRLF", "SET TRANSACTION ISOLATION LEVEL\r\nSERIALIZABLE;\r\nSELECT 1"],
+  ["several spaces", "SET   TRANSACTION   ISOLATION    LEVEL     SERIALIZABLE   SELECT 1"],
+  ["after another SET", "SET NOCOUNT ON; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; SELECT 1"],
+  [
+    "chained after a safe level, no ';'",
+    "SET TRANSACTION ISOLATION LEVEL READ COMMITTED SET TRANSACTION ISOLATION LEVEL SERIALIZABLE SELECT 1",
+  ],
+  ["block comment between words", "SET TRANSACTION ISOLATION LEVEL/**/SERIALIZABLE SELECT 1"],
+  ["line comment between words", "SET TRANSACTION ISOLATION LEVEL --x\nSERIALIZABLE\nSELECT 1"],
+  ["table hint SERIALIZABLE", "SELECT a FROM dbo.t WITH (SERIALIZABLE) WHERE b = 1"],
+  ["table hint HOLDLOCK", "SELECT a FROM dbo.t WITH (HOLDLOCK) WHERE b = 1"],
+  ["table hint holdlock, lowercase and combined", "select a from dbo.t with (nolock, holdlock)"],
+];
+
+// REPEATABLE READ keeps shared locks on every row read until the forced
+// rollback, so a long read blocks writers too. Same treatment as SERIALIZABLE.
+const REPEATABLE_READ_REJECTS: Array<[string, string]> = [
+  ["SET REPEATABLE READ", "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ SELECT 1"],
+  ["SET REPEATABLE READ with ';'", "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ; SELECT 1"],
+  ["lowercase", "set transaction isolation level repeatable read; select 1"],
+  ["mixed case", "Set Transaction Isolation Level RePeAtAbLe ReAd SELECT 1"],
+  ["tabs", "SET\tTRANSACTION\tISOLATION\tLEVEL\tREPEATABLE\tREAD\tSELECT 1"],
+  ["newline between REPEATABLE and READ", "SET TRANSACTION ISOLATION LEVEL REPEATABLE\nREAD\nSELECT 1"],
+  ["CRLF", "SET TRANSACTION ISOLATION LEVEL\r\nREPEATABLE READ;\r\nSELECT 1"],
+  ["several spaces", "SET   TRANSACTION   ISOLATION  LEVEL   REPEATABLE     READ   SELECT 1"],
+  ["after another SET", "SET NOCOUNT ON; SET TRANSACTION ISOLATION LEVEL REPEATABLE READ; SELECT 1"],
+  [
+    "chained after a safe level, no ';'",
+    "SET TRANSACTION ISOLATION LEVEL SNAPSHOT SET TRANSACTION ISOLATION LEVEL REPEATABLE READ SELECT 1",
+  ],
+  ["block comment between words", "SET TRANSACTION ISOLATION LEVEL REPEATABLE/**/READ SELECT 1"],
+  ["line comment between words", "SET TRANSACTION ISOLATION LEVEL --x\nREPEATABLE READ\nSELECT 1"],
+  ["table hint REPEATABLEREAD", "SELECT a FROM dbo.t WITH (REPEATABLEREAD) WHERE b = 1"],
+  ["table hint repeatableread, lowercase and combined", "select a from dbo.t with (nolock, repeatableread)"],
+];
+
 // Realistic read-only queries the audit workflow relies on. Over-blocking these
 // would break the repository's main purpose.
 const ACCEPTS: Array<[string, string]> = [
@@ -93,6 +138,20 @@ const ACCEPTS: Array<[string, string]> = [
     "several SET prefixes",
     "SET NOCOUNT ON; SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; SELECT name FROM sys.databases",
   ],
+  ["SET READ COMMITTED", "SET TRANSACTION ISOLATION LEVEL READ COMMITTED; SELECT 1"],
+  ["SET SNAPSHOT", "SET TRANSACTION ISOLATION LEVEL SNAPSHOT SELECT 1"],
+  ["SET read uncommitted, lowercase", "set transaction isolation level read uncommitted; select 1"],
+  ["SET snapshot across newlines", "SET TRANSACTION ISOLATION LEVEL\nsnapshot\nSELECT 1"],
+  [
+    "'Serializable' as a literal (decoding transaction_isolation_level)",
+    "SELECT CASE transaction_isolation_level WHEN 4 THEN 'Serializable' END FROM sys.dm_exec_sessions",
+  ],
+  ["[Serializable] as a bracketed alias", "SELECT 1 AS [Serializable], 2 AS [HoldLock]"],
+  [
+    "'Repeatable Read' as a literal (decoding transaction_isolation_level)",
+    "SELECT CASE transaction_isolation_level WHEN 3 THEN 'Repeatable Read' END FROM sys.dm_exec_sessions",
+  ],
+  ["[RepeatableRead] as a bracketed alias", "SELECT 1 AS [RepeatableRead]"],
   ["SET STATISTICS IO prefix", "SET STATISTICS IO ON SELECT COUNT(*) FROM dbo.t"],
   ["table hint", "SELECT a FROM dbo.t WITH (NOLOCK) WHERE b = 1"],
   ["FOR XML / OPTION", "SELECT name FROM sys.tables FOR XML PATH('') OPTION (RECOMPILE)"],
@@ -106,6 +165,14 @@ describe("isReadOnlyQuery: REVIEW §3.1 regressions", () => {
   });
 
   it.each(MORE_REJECTS)("rejects %s", (_label, sql) => {
+    expect(isReadOnlyQuery(sql)).toBe(false);
+  });
+
+  it.each(SERIALIZABLE_REJECTS)("rejects SERIALIZABLE: %s", (_label, sql) => {
+    expect(isReadOnlyQuery(sql)).toBe(false);
+  });
+
+  it.each(REPEATABLE_READ_REJECTS)("rejects REPEATABLE READ: %s", (_label, sql) => {
     expect(isReadOnlyQuery(sql)).toBe(false);
   });
 
@@ -158,6 +225,12 @@ describe("assertReadOnlyQuery", () => {
   it("throws on a write and on a dangerous pattern, passes a plain SELECT", () => {
     expect(() => assertReadOnlyQuery("t", "DELETE FROM x")).toThrow(/rejected/);
     expect(() => assertReadOnlyQuery("t", "SELECT 'SHUTDOWN'")).toThrow(/dangerous/);
+    expect(() =>
+      assertReadOnlyQuery("t", "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; SELECT 1"),
+    ).toThrow(/rejected/);
+    expect(() =>
+      assertReadOnlyQuery("t", "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ; SELECT 1"),
+    ).toThrow(/rejected/);
     expect(() => assertReadOnlyQuery("t", "SELECT 1")).not.toThrow();
   });
 });
