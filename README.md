@@ -665,7 +665,7 @@ de `docker-compose`), ponlo a `true` de forma explícita en tu `.env`.
   SHA-256 del SQL (no el SQL) y filas devueltas. Se desactiva con `MSSQL_AUDIT_LOG=false`.
 - **Timeouts configurables** y **límite de filas**.
 
-El recorrido completo de una consulta (tool, `sql-sanitizer`, `MSSQL_READ_ONLY`, pool `mssql` y SQL Server, con la rama de rechazo) está en el diagrama [Flujo de una consulta](assets/diagramas/flujo-consulta.html) ([SVG](assets/diagramas/flujo-consulta.svg)).
+El recorrido completo de una consulta (registro `callTool`, validación zod de argumentos, `sql-sanitizer` de una sola sentencia, `MSSQL_READ_ONLY`, transacción con `ROLLBACK` forzado o conexión dedicada con `SHOWPLAN`/`PARSEONLY` en lotes separados, respuesta con `isError` y bitácora de auditoría en stderr) está en el diagrama [Flujo de una consulta](assets/diagramas/flujo-consulta.html) ([SVG](assets/diagramas/flujo-consulta.svg)).
 
 ### Login de mínimo privilegio
 

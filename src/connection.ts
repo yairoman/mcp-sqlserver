@@ -4,6 +4,12 @@ import { sanitizeIdentifier } from "./utils/sql-sanitizer.js";
 import { auditSql, countRows } from "./utils/audit.js";
 
 let pool: sql.ConnectionPool | null = null;
+/**
+ * The connection attempt in flight, if any. Concurrent callers share it, so two
+ * tools called before the first connect finishes get the same pool instead of
+ * each creating one (and orphaning all but the last).
+ */
+let connecting: Promise<sql.ConnectionPool> | null = null;
 
 /**
  * Translate the app config into an mssql connection config.
@@ -46,15 +52,42 @@ function createPool(config: AppConfig, poolSize?: { min: number; max: number }):
 /**
  * Get or create the SQL Server connection pool.
  * Uses lazy initialization — pool is created on first call.
+ *
+ * Only one connection attempt is in flight at a time: concurrent callers await the
+ * same promise. If the attempt fails it is forgotten, so the next call retries. If
+ * closePool() runs while the attempt is in flight, the pool is closed as soon as it
+ * connects and the waiting callers get an error instead of a pool nobody tracks.
  */
-export async function getPool(config: AppConfig): Promise<sql.ConnectionPool> {
+export function getPool(config: AppConfig): Promise<sql.ConnectionPool> {
   if (pool && pool.connected) {
-    return pool;
+    return Promise.resolve(pool);
+  }
+  if (connecting) {
+    return connecting;
   }
 
-  pool = createPool(config);
-  await pool.connect();
-  return pool;
+  const created = createPool(config);
+  const attempt: Promise<sql.ConnectionPool> = created.connect().then(
+    async () => {
+      if (connecting !== attempt) {
+        // closePool() ran while we were connecting: do not resurrect the pool.
+        await created.close().catch(() => undefined);
+        throw new Error("SQL Server connection pool was closed while connecting");
+      }
+      pool = created;
+      connecting = null;
+      return created;
+    },
+    async (error: unknown) => {
+      if (connecting === attempt) {
+        connecting = null;
+      }
+      await created.close().catch(() => undefined);
+      throw error;
+    }
+  );
+  connecting = attempt;
+  return attempt;
 }
 
 /**
@@ -200,11 +233,19 @@ export async function withDedicatedConnection<T>(
 }
 
 /**
- * Close the connection pool gracefully.
+ * Close the connection pool gracefully, including one still connecting.
  */
 export async function closePool(): Promise<void> {
-  if (pool) {
-    await pool.close();
-    pool = null;
+  const inFlight = connecting;
+  const current = pool;
+  connecting = null;
+  pool = null;
+  if (current) {
+    await current.close();
+  }
+  if (inFlight) {
+    // The attempt sees it was abandoned, closes its pool and rejects; its callers
+    // get that error. Wait for it so the socket is closed when we return.
+    await inFlight.catch(() => undefined);
   }
 }
