@@ -172,15 +172,27 @@ ${query}`;
  * It does NOT undo effects outside the transaction (sequences, identity values,
  * extended procedures, linked-server calls, DDL that cannot run in a transaction
  * fails instead). The real control is a least-privilege login — see README.
+ *
+ * `options.rowLimit` caps the rows on the SERVER with SET ROWCOUNT: SQL Server
+ * stops producing rows once it has sent that many, so a `SELECT *` on a huge
+ * table neither travels over the network nor fills the process memory. Use it
+ * only for caller-supplied queries; the cap is lifted (SET ROWCOUNT 0) on the
+ * same connection before it goes back to the pool.
  */
 export async function executeReadOnlyOnDatabase(
   config: AppConfig,
   database: string,
   query: string,
-  params?: Record<string, unknown>
+  params?: Record<string, unknown>,
+  options?: { rowLimit?: number }
 ): Promise<sql.IResult<Record<string, unknown>>> {
   const sanitizedDb = sanitizeIdentifier(database);
-  const fullQuery = `USE [${sanitizedDb}];\n${query}`;
+  const rowLimit = options?.rowLimit;
+  if (rowLimit !== undefined && (!Number.isSafeInteger(rowLimit) || rowLimit < 1)) {
+    throw new Error(`Invalid rowLimit: ${rowLimit}. Expected a positive integer.`);
+  }
+  const limitClause = rowLimit !== undefined ? `SET ROWCOUNT ${rowLimit};\n` : "";
+  const fullQuery = `USE [${sanitizedDb}];\n${limitClause}${query}`;
 
   const p = await getPool(config);
   const transaction = new sql.Transaction(p);
@@ -191,6 +203,16 @@ export async function executeReadOnlyOnDatabase(
     bindParams(request, params);
     return await audited(config, sanitizedDb, fullQuery, () => request.query(fullQuery));
   } finally {
+    if (rowLimit !== undefined) {
+      try {
+        // SET ROWCOUNT is session state: never hand a capped connection back to
+        // the pool, or the next tool would silently get truncated results.
+        const reset = "SET ROWCOUNT 0";
+        await audited(config, sanitizedDb, reset, () => new sql.Request(transaction).query(reset));
+      } catch {
+        // Connection already broken; the pool will discard it.
+      }
+    }
     try {
       await transaction.rollback();
     } catch {
