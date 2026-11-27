@@ -1,5 +1,5 @@
 import type { AppConfig } from "../../config.js";
-import { executeQueryOnDatabase } from "../../connection.js";
+import { executeQueryOnDatabase, executeReadOnlyOnDatabase } from "../../connection.js";
 import { sanitizeIdentifier, isReadOnlyQuery, validateQuerySafety } from "../../utils/sql-sanitizer.js";
 import { formatQueryResult } from "../../utils/result-formatter.js";
 
@@ -42,7 +42,10 @@ export async function executeQueryHandler(
     return `❌ **Query rejected** — dangerous patterns detected:\n${warnings.map((w) => `- ${w}`).join("\n")}`;
   }
 
-  if (!allowWrite || config.readOnly) {
+  // Writes only when BOTH the server allows them and the caller asks for them.
+  const writeMode = allowWrite && !config.readOnly;
+
+  if (!writeMode) {
     if (!isReadOnlyQuery(query)) {
       if (config.readOnly) {
         return "❌ **Query rejected**: Server is in read-only mode (MSSQL_READ_ONLY=true). Only SELECT queries are allowed.";
@@ -52,7 +55,10 @@ export async function executeQueryHandler(
   }
 
   const startTime = Date.now();
-  const result = await executeQueryOnDatabase(config, database, query);
+  // Read path runs inside a transaction that is always rolled back.
+  const result = writeMode
+    ? await executeQueryOnDatabase(config, database, query)
+    : await executeReadOnlyOnDatabase(config, database, query);
   const elapsed = Date.now() - startTime;
 
   // If it returned rows (SELECT)

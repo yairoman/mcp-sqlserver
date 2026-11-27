@@ -1,5 +1,5 @@
 import type { AppConfig } from "../../config.js";
-import { executeQueryOnDatabase } from "../../connection.js";
+import { executeReadOnlyOnDatabase } from "../../connection.js";
 import { sanitizeIdentifier } from "../../utils/sql-sanitizer.js";
 import { isReadOnlyQuery, validateQuerySafety } from "../../utils/sql-sanitizer.js";
 import { formatQueryResult } from "../../utils/result-formatter.js";
@@ -44,7 +44,7 @@ export async function executeSelectQueryHandler(
   }
 
   const startTime = Date.now();
-  const result = await executeQueryOnDatabase(config, database, query);
+  const result = await executeReadOnlyOnDatabase(config, database, query);
   const elapsed = Date.now() - startTime;
 
   const columns =

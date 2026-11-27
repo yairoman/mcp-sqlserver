@@ -43,14 +43,14 @@ Edita el `.env` con los datos de tu SQL Server:
 # Conexión SQL Server
 MSSQL_HOST=tu-servidor          # IP o hostname del server
 MSSQL_PORT=1433                 # Puerto (default: 1433)
-MSSQL_USER=tu-usuario           # Usuario SQL
+MSSQL_USER=tu-usuario           # Login de solo lectura (ver "Login de mínimo privilegio"); nunca sa
 MSSQL_PASSWORD=tu-password      # Contraseña
 MSSQL_DATABASE=master           # Base de datos inicial
 
 # Seguridad
-MSSQL_ENCRYPT=true              # true si usas SSL/TLS, false para conexiones locales
-MSSQL_TRUST_SERVER_CERTIFICATE=true   # true para aceptar certificados auto-firmados
-MSSQL_READ_ONLY=true            # true = solo SELECT, false = permite INSERT/UPDATE/DELETE
+MSSQL_ENCRYPT=true              # solo "false" (explícito) desactiva TLS
+MSSQL_TRUST_SERVER_CERTIFICATE=false  # solo "true" (explícito) acepta certificados sin validar
+MSSQL_READ_ONLY=true            # solo "false" (explícito) habilita escritura; cualquier otro valor = solo lectura
 
 # Límites
 MSSQL_MAX_ROWS=1000             # Máximo de filas por consulta
@@ -626,14 +626,19 @@ deja como **propuesta** para que una persona la revise: antes de crearlo convien
 | `MSSQL_USER`                     | (requerido) | Usuario SQL                  |
 | `MSSQL_PASSWORD`                 | (requerido) | Contraseña                   |
 | `MSSQL_DATABASE`                 | `master`    | Base de datos por defecto    |
-| `MSSQL_ENCRYPT`                  | `true`      | Encriptar conexión           |
-| `MSSQL_TRUST_SERVER_CERTIFICATE` | `true`      | Confiar en certificado       |
-| `MSSQL_READ_ONLY`                | `true`      | Solo permitir SELECT         |
+| `MSSQL_ENCRYPT`                  | `true`      | Encriptar conexión. Solo `false` explícito la desactiva |
+| `MSSQL_TRUST_SERVER_CERTIFICATE` | `false`     | Aceptar el certificado sin validarlo. Solo `true` explícito lo activa |
+| `MSSQL_READ_ONLY`                | `true`      | Modo solo lectura. Solo `false` explícito lo desactiva |
 | `MSSQL_MAX_ROWS`                 | `1000`      | Máximo de filas por consulta |
 | `MSSQL_QUERY_TIMEOUT`            | `30000`     | Timeout de queries (ms)      |
 | `MSSQL_CONNECTION_TIMEOUT`       | `15000`     | Timeout de conexión (ms)     |
 | `MSSQL_POOL_MIN`                 | `1`         | Conexiones mínimas del pool  |
 | `MSSQL_POOL_MAX`                 | `10`        | Conexiones máximas del pool  |
+
+Las tres banderas de seguridad **fallan en cerrado** y no distinguen mayúsculas: un valor vacío,
+`1`, `yes` o una errata dejan el modo seguro activo. `MSSQL_TRUST_SERVER_CERTIFICATE` pasó a `false`
+por defecto: si tu servidor usa un certificado autofirmado (típico en desarrollo o en el contenedor
+de `docker-compose`), ponlo a `true` de forma explícita en tu `.env`.
 
 ---
 
@@ -646,6 +651,38 @@ deja como **propuesta** para que una persona la revise: antes de crearlo convien
 - **Límite de filas**: Previene descarga accidental de tablas enormes
 
 El recorrido completo de una consulta (tool, `sql-sanitizer`, `MSSQL_READ_ONLY`, pool `mssql` y SQL Server, con la rama de rechazo) está en el diagrama [Flujo de una consulta](assets/diagramas/flujo-consulta.html) ([SVG](assets/diagramas/flujo-consulta.svg)).
+
+### Login de mínimo privilegio
+
+El filtro de texto del servidor y la transacción con rollback son **defensa en profundidad**.
+El control que de verdad limita lo que el LLM puede hacer es **el login SQL** con el que se conecta
+el MCP. Usa siempre un login dedicado de solo lectura, **nunca `sa`** ni un miembro de `sysadmin`
+o `db_owner`:
+
+```sql
+CREATE LOGIN mcp_reader WITH PASSWORD = '<contraseña-larga-y-única>', CHECK_POLICY = ON;
+GRANT VIEW SERVER STATE TO mcp_reader;          -- DMVs de instancia (rendimiento, bloqueos)
+GRANT VIEW ANY DEFINITION TO mcp_reader;        -- opcional: definiciones de objetos en todas las bases
+
+-- En cada base que el MCP deba leer:
+USE [MiBase];
+CREATE USER mcp_reader FOR LOGIN mcp_reader;
+ALTER ROLE db_datareader ADD MEMBER mcp_reader;
+GRANT VIEW DATABASE STATE TO mcp_reader;        -- DMVs de base (índices, estadísticas, Query Store)
+```
+
+En SQL Server 2022 o superior, `VIEW SERVER PERFORMANCE STATE` y `VIEW DATABASE PERFORMANCE STATE`
+son alternativas más acotadas. Si una tool necesita un permiso que el login no tiene, falla con un
+error de permisos: es el comportamiento esperado.
+
+Qué hace el servidor además del login:
+
+- `execute_select_query`, `read_table_data` y la ruta de lectura de `execute_query` se ejecutan
+  dentro de una transacción que **siempre** se revierte (`BEGIN TRAN … ROLLBACK`). Si algo evade el
+  validador de texto, el motor deshace el DML. No deshace efectos fuera de la transacción
+  (secuencias, valores de identidad, procedimientos extendidos, llamadas a servidores vinculados).
+- `MSSQL_READ_ONLY` falla en cerrado: solo `false` explícito habilita la escritura, y aun así cada
+  llamada a `execute_query` tiene que pedirla con `allowWrite: true`.
 
 ---
 

@@ -1,5 +1,23 @@
 import { z } from "zod";
 
+/**
+ * Boolean env var that only turns OFF with an explicit, case-insensitive "false".
+ * Any other value — including empty, "0", "no" or a typo — keeps it ON (fail-closed).
+ */
+const onUnlessExplicitFalse = z
+  .string()
+  .optional()
+  .transform((v) => v === undefined || v.trim().toLowerCase() !== "false");
+
+/**
+ * Boolean env var that only turns ON with an explicit, case-insensitive "true".
+ * Any other value keeps it OFF (fail-closed).
+ */
+const offUnlessExplicitTrue = z
+  .string()
+  .optional()
+  .transform((v) => v !== undefined && v.trim().toLowerCase() === "true");
+
 const configSchema = z.object({
   // Connection
   host: z.string().min(1, "MSSQL_HOST is required"),
@@ -8,19 +26,10 @@ const configSchema = z.object({
   password: z.string().min(1, "MSSQL_PASSWORD is required"),
   database: z.string().default("master"),
 
-  // Security
-  encrypt: z
-    .string()
-    .transform((v) => v === "true")
-    .default("true"),
-  trustServerCertificate: z
-    .string()
-    .transform((v) => v === "true")
-    .default("true"),
-  readOnly: z
-    .string()
-    .transform((v) => v === "true")
-    .default("true"),
+  // Security — every flag fails closed
+  encrypt: onUnlessExplicitFalse,
+  trustServerCertificate: offUnlessExplicitTrue,
+  readOnly: onUnlessExplicitFalse,
 
   // Limits
   maxRows: z.coerce.number().int().positive().default(1000),
@@ -34,21 +43,21 @@ const configSchema = z.object({
 
 export type AppConfig = z.infer<typeof configSchema>;
 
-export function loadConfig(): AppConfig {
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const raw = {
-    host: process.env.MSSQL_HOST,
-    port: process.env.MSSQL_PORT,
-    user: process.env.MSSQL_USER,
-    password: process.env.MSSQL_PASSWORD,
-    database: process.env.MSSQL_DATABASE,
-    encrypt: process.env.MSSQL_ENCRYPT,
-    trustServerCertificate: process.env.MSSQL_TRUST_SERVER_CERTIFICATE,
-    readOnly: process.env.MSSQL_READ_ONLY,
-    maxRows: process.env.MSSQL_MAX_ROWS,
-    queryTimeout: process.env.MSSQL_QUERY_TIMEOUT,
-    connectionTimeout: process.env.MSSQL_CONNECTION_TIMEOUT,
-    poolMin: process.env.MSSQL_POOL_MIN,
-    poolMax: process.env.MSSQL_POOL_MAX,
+    host: env.MSSQL_HOST,
+    port: env.MSSQL_PORT,
+    user: env.MSSQL_USER,
+    password: env.MSSQL_PASSWORD,
+    database: env.MSSQL_DATABASE,
+    encrypt: env.MSSQL_ENCRYPT,
+    trustServerCertificate: env.MSSQL_TRUST_SERVER_CERTIFICATE,
+    readOnly: env.MSSQL_READ_ONLY,
+    maxRows: env.MSSQL_MAX_ROWS,
+    queryTimeout: env.MSSQL_QUERY_TIMEOUT,
+    connectionTimeout: env.MSSQL_CONNECTION_TIMEOUT,
+    poolMin: env.MSSQL_POOL_MIN,
+    poolMax: env.MSSQL_POOL_MAX,
   };
 
   const result = configSchema.safeParse(raw);

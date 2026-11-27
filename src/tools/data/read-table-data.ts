@@ -1,5 +1,5 @@
 import type { AppConfig } from "../../config.js";
-import { executeQueryOnDatabase } from "../../connection.js";
+import { executeReadOnlyOnDatabase } from "../../connection.js";
 import {
   sanitizeIdentifier,
   quoteIdentifier,
@@ -96,7 +96,7 @@ export async function readTableDataHandler(
   }
 
   const startTime = Date.now();
-  const result = await executeQueryOnDatabase(config, database, query);
+  const result = await executeReadOnlyOnDatabase(config, database, query);
   const elapsed = Date.now() - startTime;
 
   const columns =
