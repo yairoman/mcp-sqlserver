@@ -112,6 +112,15 @@ const REPEATABLE_READ_REJECTS: Array<[string, string]> = [
   ["line comment between words", "SET TRANSACTION ISOLATION LEVEL --x\nREPEATABLE READ\nSELECT 1"],
   ["table hint REPEATABLEREAD", "SELECT a FROM dbo.t WITH (REPEATABLEREAD) WHERE b = 1"],
   ["table hint repeatableread, lowercase and combined", "select a from dbo.t with (nolock, repeatableread)"],
+  ["table hint with tabs and CRLF", "SELECT a FROM dbo.t WITH (\tNOLOCK,\r\n\tREPEATABLEREAD\r\n) WHERE b = 1"],
+  ["table hint without WITH (legacy syntax)", "SELECT a FROM dbo.t (REPEATABLEREAD)"],
+  ["table hint on a joined table", "SELECT a.x FROM dbo.a a JOIN dbo.b b WITH (REPEATABLEREAD) ON a.id = b.id"],
+  ["table hint inside a CTE", "WITH x AS (SELECT a FROM dbo.t WITH (REPEATABLEREAD)) SELECT a FROM x"],
+  ["query-level TABLE HINT", "SELECT a FROM dbo.t OPTION (TABLE HINT(dbo.t, REPEATABLEREAD))"],
+  ["block comment inside the hint", "SELECT a FROM dbo.t WITH (/**/REPEATABLEREAD)"],
+  ["chained after the SELECT with ';'", "SELECT 1; SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"],
+  ["chained after the SELECT without ';'", "SELECT 1 SET TRANSACTION ISOLATION LEVEL REPEATABLE READ SELECT 2"],
+  ["chained second SELECT with the hint", "SELECT 1; SELECT a FROM dbo.t WITH (REPEATABLEREAD)"],
 ];
 
 // Realistic read-only queries the audit workflow relies on. Over-blocking these
