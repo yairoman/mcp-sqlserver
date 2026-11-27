@@ -89,6 +89,7 @@ como el estado que se entregó al cliente en su día.
 npm run build            # tsup
 npm run dev              # tsx watch src/index.ts
 npm test                 # vitest run
+npm run test:integration # contra el contenedor desechable del compose; ver README
 npm run lint             # tsc --noEmit
 npm run validate:skills  # consistencia de .claude/skills/ — correr tras editar un skill
 ```

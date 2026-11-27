@@ -4,13 +4,17 @@ services:
   # SQL Server for development/testing
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
+    # The integration suite (npm run test:integration) checks this name through
+    # SERVERPROPERTY('MachineName') and refuses to run against any other server.
+    hostname: mcp-sqlserver-test
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD in .env}
       MSSQL_PID: "Developer"
     ports:
       # Bound to localhost only: not reachable from the network.
-      - "127.0.0.1:1433:1433"
+      # MSSQL_HOST_PORT moves it if 1433 is taken (then set MSSQL_IT_PORT to match).
+      - "127.0.0.1:${MSSQL_HOST_PORT:-1433}:1433"
     volumes:
       - sqldata:/var/opt/mssql
     healthcheck:
