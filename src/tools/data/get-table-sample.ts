@@ -1,5 +1,5 @@
 import type { AppConfig } from "../../config.js";
-import { executeQueryOnDatabase } from "../../connection.js";
+import { executeReadOnlyOnDatabase } from "../../connection.js";
 import {
   sanitizeIdentifier,
   qualifiedName,
@@ -49,7 +49,7 @@ export async function getTableSampleHandler(
   // Get sample rows
   const sampleQuery = `SELECT TOP ${sampleSize} * FROM ${fullName}`;
   const startTime = Date.now();
-  const sampleResult = await executeQueryOnDatabase(
+  const sampleResult = await executeReadOnlyOnDatabase(
     config,
     database,
     sampleQuery
@@ -57,7 +57,7 @@ export async function getTableSampleHandler(
   const elapsed = Date.now() - startTime;
 
   // Get row count
-  const countResult = await executeQueryOnDatabase(
+  const countResult = await executeReadOnlyOnDatabase(
     config,
     database,
     `SELECT COUNT(*) AS totalRows FROM ${fullName}`
@@ -78,7 +78,7 @@ export async function getTableSampleHandler(
     WHERE s.name = '${schema}' AND t.name = '${table}'
     ORDER BY c.column_id`;
 
-  const statsResult = await executeQueryOnDatabase(
+  const statsResult = await executeReadOnlyOnDatabase(
     config,
     database,
     statsQuery

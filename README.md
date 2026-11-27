@@ -242,7 +242,7 @@ Finalmente, clic en **Guardar**.
 
 | Tool                   | Descripción                                         |
 | ---------------------- | --------------------------------------------------- |
-| `read_table_data`      | Lee datos de tablas con filtros, paginación y orden |
+| `read_table_data`      | Lee datos de tablas con filtros estructurados y parametrizados (`filters`), paginación y orden |
 | `execute_select_query` | Ejecuta SELECT arbitrario (validado como read-only) |
 | `search_data`          | Busca valores con LIKE en columnas específicas      |
 | `get_table_sample`     | Muestra representativa + estadísticas básicas       |
@@ -252,8 +252,8 @@ Finalmente, clic en **Guardar**.
 | Tool             | Descripción                                          |
 | ---------------- | ---------------------------------------------------- |
 | `execute_query`  | Ejecuta cualquier query T-SQL (read-only/read-write) |
-| `explain_query`  | Plan de ejecución estimado                           |
-| `validate_query` | Validación de sintaxis sin ejecutar                  |
+| `explain_query`  | Plan estimado de un `SELECT`/`WITH`, sin ejecutarlo  |
+| `validate_query` | Sintaxis de un `SELECT`/`WITH`, sin ejecutarlo       |
 
 ### 📈 Performance & Monitoring (11)
 
@@ -677,7 +677,8 @@ error de permisos: es el comportamiento esperado.
 
 Qué hace el servidor además del login:
 
-- `execute_select_query`, `read_table_data` y la ruta de lectura de `execute_query` se ejecutan
+- `execute_select_query`, `read_table_data`, `search_data`, `get_table_sample` y la ruta de lectura
+  de `execute_query` se ejecutan
   dentro de una transacción que **siempre** se revierte (`BEGIN TRAN … ROLLBACK`). Si algo evade el
   validador de texto, el motor deshace el DML. No deshace efectos fuera de la transacción
   (secuencias, valores de identidad, procedimientos extendidos, llamadas a servidores vinculados).
@@ -774,16 +775,16 @@ npm run validate:skills  # Consistencia de .claude/skills/
 > **Nota**: el proyecto todavía no tiene archivos de test, así que `npm test` termina con
 > `No test files found` y código de salida 1. Es lo esperado hoy, no un fallo de instalación.
 
-Para lanzar una consulta suelta contra el servidor sin pasar por el MCP, `run-query.mjs` en la raíz
-reutiliza el mismo `.env`:
+Para lanzar una tool suelta sin cliente MCP, `src/direct-call.ts` reutiliza el mismo `.env` y pasa
+por el mismo `callTool()` que el servidor, con las mismas validaciones:
 
 ```bash
-node run-query.mjs "SELECT @@VERSION"
+npx tsx src/direct-call.ts execute_select_query '{"database":"master","query":"SELECT @@VERSION AS version"}'
+npx tsx src/direct-call.ts wait_stats '{"top":10}'
 ```
 
-Sin argumento lista las tablas base de la base configurada. Ojo: `run-query.mjs` ejecuta la
-consulta **sin pasar por el validador** de `sql-sanitizer.ts` — es una utilidad de desarrollo, no
-una vía de acceso equivalente a las tools.
+Sin argumentos lista las tools disponibles. El antiguo `run-query.mjs`, que ejecutaba SQL sin pasar
+por el validador, se retiró.
 
 ## 📄 Licencia
 

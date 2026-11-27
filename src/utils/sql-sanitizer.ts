@@ -1,3 +1,5 @@
+import { McpToolError } from "./error-handler.js";
+
 /**
  * SQL Sanitizer — prevents SQL injection in dynamic queries.
  */
@@ -107,4 +109,25 @@ export function quoteIdentifier(name: string): string {
  */
 export function qualifiedName(schema: string, name: string): string {
   return `${quoteIdentifier(schema)}.${quoteIdentifier(name)}`;
+}
+
+/**
+ * Throw unless `query` passes both the read-only check and the safety scan.
+ * Use it before opening any connection.
+ */
+export function assertReadOnlyQuery(toolName: string, query: string): void {
+  if (!isReadOnlyQuery(query)) {
+    throw new McpToolError(
+      toolName,
+      "Query rejected: only a single read-only SELECT or WITH (CTE) statement is allowed."
+    );
+  }
+  const warnings = validateQuerySafety(query);
+  if (warnings.length > 0) {
+    throw new McpToolError(
+      toolName,
+      "Query rejected: dangerous patterns detected.",
+      warnings.join("; ")
+    );
+  }
 }

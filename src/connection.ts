@@ -118,6 +118,26 @@ export async function executeReadOnlyOnDatabase(
 }
 
 /**
+ * Run `work` on a dedicated single-connection pool that is closed afterwards.
+ *
+ * Use it for connection-scoped SET options (SHOWPLAN, PARSEONLY): every step is
+ * sent as its own batch over the same physical connection, and closing the pool
+ * guarantees none of that state leaks into the shared pool.
+ */
+export async function withDedicatedConnection<T>(
+  config: AppConfig,
+  work: (connection: sql.ConnectionPool) => Promise<T>
+): Promise<T> {
+  const dedicated = new sql.ConnectionPool(buildSqlConfig(config, { min: 0, max: 1 }));
+  await dedicated.connect();
+  try {
+    return await work(dedicated);
+  } finally {
+    await dedicated.close();
+  }
+}
+
+/**
  * Close the connection pool gracefully.
  */
 export async function closePool(): Promise<void> {

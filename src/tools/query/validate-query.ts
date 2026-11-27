@@ -1,11 +1,11 @@
 import type { AppConfig } from "../../config.js";
-import { executeQueryOnDatabase } from "../../connection.js";
-import { sanitizeIdentifier } from "../../utils/sql-sanitizer.js";
+import { withDedicatedConnection } from "../../connection.js";
+import { sanitizeIdentifier, assertReadOnlyQuery } from "../../utils/sql-sanitizer.js";
 
 export const validateQueryDefinition = {
   name: "validate_query",
   description:
-    "Validate the syntax of a T-SQL query without executing it. Uses SET PARSEONLY to check for syntax errors. Returns success or the specific syntax error.",
+    "Validate the syntax of a read-only T-SQL query (SELECT or WITH) without executing it. SET PARSEONLY is enabled in its own batch on a dedicated connection. Returns success or the specific syntax error.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -15,7 +15,7 @@ export const validateQueryDefinition = {
       },
       query: {
         type: "string",
-        description: "The T-SQL query to validate",
+        description: "The read-only T-SQL query (SELECT or WITH) to validate",
       },
     },
     required: ["database", "query"],
@@ -29,9 +29,19 @@ export async function validateQueryHandler(
   const database = sanitizeIdentifier(args.database as string);
   const query = (args.query as string).trim();
 
+  // Validate BEFORE touching the server.
+  assertReadOnlyQuery(validateQueryDefinition.name, query);
+
   try {
-    const parseQuery = `SET PARSEONLY ON;\n${query}\nSET PARSEONLY OFF;`;
-    await executeQueryOnDatabase(config, database, parseQuery);
+    await withDedicatedConnection(config, async (conn) => {
+      await conn.request().batch(`USE [${database}]`);
+      await conn.request().batch("SET PARSEONLY ON");
+      try {
+        await conn.request().batch(query);
+      } finally {
+        await conn.request().batch("SET PARSEONLY OFF");
+      }
+    });
     return `✅ **Query syntax is valid.**\n\n\`\`\`sql\n${query}\n\`\`\``;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

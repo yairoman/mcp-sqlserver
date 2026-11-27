@@ -35,8 +35,10 @@ usando ese servidor; los informes viven en `docs/`, que no se versiona.
     exporta `<nombre>Definition` y `<nombre>Handler`.
   - `src/resources/`, `src/utils/` (`sql-sanitizer.ts`, `error-handler.ts`, `result-formatter.ts`),
     `src/types/`.
-  - `src/direct-call.ts` — invocador directo de handlers, sin transporte MCP.
-  - `run-query.mjs` — utilidad para lanzar una consulta suelta con el mismo `.env`.
+  - `src/tools/registry.ts` — registro único de las tools y `callTool()`, el punto de entrada
+    común del servidor MCP y de `direct-call.ts`.
+  - `src/direct-call.ts` — invoca cualquier tool sin transporte MCP, pasando por `callTool()`
+    (mismas validaciones que el servidor). Sustituye al antiguo `run-query.mjs`.
   - `.claude/skills/` — skills del proyecto (`buenas-practicas-sql`, `analisis-bd`), versionados.
 
 ## Instalar
@@ -119,8 +121,9 @@ npx tsx src/index.ts     # sin compilar; es la variante que usa .mcp.json
 - **stdout en `src/index.ts`** — cualquier `console.log` corrompe el canal JSON-RPC.
 - **`docs/`** — en `.gitignore`: contiene datos de bases productivas de clientes. Nunca añadirlo
   al índice ni proponer commitearlo. Tampoco `.env`.
-- **`run-query.mjs`** — ejecuta SQL **sin pasar por el validador**; es una utilidad de
-  desarrollo, no una vía equivalente a las tools.
+- **Puertas laterales** — cualquier vía de ejecución fuera del servidor (scripts, CLIs) tiene que
+  pasar por `callTool()` de `src/tools/registry.ts`. No reintroducir utilidades que ejecuten SQL
+  sin el validador (como el antiguo `run-query.mjs`).
 - **`docker-compose.yml`** — contiene la contraseña `sa` del entorno de pruebas; es solo para
   desarrollo local.
 - **`.claude/skills/`** — base de conocimiento versionada con registro y numeración de reglas
