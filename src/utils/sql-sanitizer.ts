@@ -14,9 +14,15 @@ import { McpToolError } from "./error-handler.js";
 /** Comments are rejected anywhere in the raw text, even inside string literals. */
 const COMMENT_PATTERN = /--|\/\*|\*\//;
 
-/** Leading SET statements that may precede the SELECT / WITH. */
+/**
+ * Leading SET statements that may precede the SELECT / WITH.
+ *
+ * SERIALIZABLE is deliberately absent: it holds key-range locks until the
+ * forced rollback, so a long read can block other sessions' writes for its
+ * whole duration. Without a match here the body starts with SET and is rejected.
+ */
 const ALLOWED_SET_PREFIX =
-  /^SET\s+(?:(?:NOCOUNT|ANSI_NULLS|QUOTED_IDENTIFIER|STATISTICS\s+(?:IO|TIME|XML|PROFILE)|SHOWPLAN_(?:TEXT|ALL|XML))\s+(?:ON|OFF)|TRANSACTION\s+ISOLATION\s+LEVEL\s+(?:READ\s+UNCOMMITTED|READ\s+COMMITTED|REPEATABLE\s+READ|SNAPSHOT|SERIALIZABLE))\s*(?:;\s*|\s+|$)/i;
+  /^SET\s+(?:(?:NOCOUNT|ANSI_NULLS|QUOTED_IDENTIFIER|STATISTICS\s+(?:IO|TIME|XML|PROFILE)|SHOWPLAN_(?:TEXT|ALL|XML))\s+(?:ON|OFF)|TRANSACTION\s+ISOLATION\s+LEVEL\s+(?:READ\s+UNCOMMITTED|READ\s+COMMITTED|REPEATABLE\s+READ|SNAPSHOT))\s*(?:;\s*|\s+|$)/i;
 
 /**
  * Keywords that never belong in a read-only query. Matched per token (see
