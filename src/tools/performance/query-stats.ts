@@ -16,7 +16,9 @@ export const queryStatsDefinition = {
         default: "cpu",
       },
       top: {
-        type: "number",
+        type: "integer",
+        minimum: 1,
+        maximum: 500,
         description: "Number of top queries to return (default: 20)",
         default: 20,
       },
@@ -29,7 +31,7 @@ export async function queryStatsHandler(
   args: Record<string, unknown>
 ): Promise<string> {
   const sortBy = (args.sortBy as string) || "cpu";
-  const top = (args.top as number) || 20;
+  const top = Math.min(Math.max(Math.trunc(Number(args.top)) || 20, 1), 500);
 
   const sortColumn: Record<string, string> = {
     cpu: "qs.total_worker_time",

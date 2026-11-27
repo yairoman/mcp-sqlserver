@@ -59,7 +59,7 @@ export const compatibilityAssessmentDefinition = {
           "Database to assess in depth. Omit to list every database and its gap to the target.",
       },
       targetLevel: {
-        type: "number",
+        type: "integer",
         description:
           "Target compatibility level (130 = SQL Server 2016, 140 = 2017, 150 = 2019, 160 = 2022). Defaults to the highest level this engine supports.",
       },

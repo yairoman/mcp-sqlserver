@@ -106,7 +106,9 @@ export const performanceTriageDefinition = {
     type: "object" as const,
     properties: {
       sampleSeconds: {
-        type: "number",
+        type: "integer",
+        minimum: 5,
+        maximum: 60,
         description:
           "Length of the measured window in seconds (default: 30, max 60). Longer windows catch intermittent problems; shorter ones respond faster.",
         default: DEFAULT_SAMPLE_SECONDS,

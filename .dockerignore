@@ -1,0 +1,20 @@
+# Secrets and local state never enter the build context
+.env
+.env.*
+!.env.example
+.claude/
+docs/
+
+# Build output and dependencies are rebuilt inside the image
+node_modules/
+dist/
+coverage/
+
+# Repository metadata and non-runtime content
+.git/
+.github/
+assets/
+odd/
+tests/
+*.log
+*.md

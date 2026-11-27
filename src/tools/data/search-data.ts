@@ -1,5 +1,5 @@
 import type { AppConfig } from "../../config.js";
-import { executeQueryOnDatabase } from "../../connection.js";
+import { executeReadOnlyOnDatabase } from "../../connection.js";
 import {
   sanitizeIdentifier,
   qualifiedName,
@@ -62,20 +62,17 @@ export async function searchDataHandler(
   const searchValue = args.searchValue as string;
   const exactMatch = args.exactMatch === true;
 
-  // Escape value for inline SQL (safe since we control the context)
-  const escapedValue = searchValue.replace(/'/g, "''");
-  const inlineConditions = searchColumns.map((col) => {
-    if (exactMatch) {
-      return `${quoteIdentifier(col)} = '${escapedValue}'`;
-    }
-    return `${quoteIdentifier(col)} LIKE '%${escapedValue}%'`;
-  });
+  // The search value is always bound as a parameter, never written into the SQL.
+  const conditions = searchColumns.map((col) =>
+    exactMatch ? `${quoteIdentifier(col)} = @searchValue` : `${quoteIdentifier(col)} LIKE @searchValue`
+  );
+  const params = { searchValue: exactMatch ? searchValue : `%${searchValue}%` };
 
-  const whereClause = inlineConditions.join(" OR ");
+  const whereClause = conditions.join(" OR ");
   const query = `SELECT TOP ${config.maxRows} * FROM ${qualifiedName(schema, table)} WHERE ${whereClause}`;
 
   const startTime = Date.now();
-  const result = await executeQueryOnDatabase(config, database, query);
+  const result = await executeReadOnlyOnDatabase(config, database, query, params);
   const elapsed = Date.now() - startTime;
 
   const columns =

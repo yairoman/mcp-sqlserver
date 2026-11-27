@@ -17,7 +17,9 @@ export const blockingHistoryDefinition = {
     type: "object" as const,
     properties: {
       hours: {
-        type: "number",
+        type: "integer",
+        minimum: 1,
+        maximum: 24 * 90,
         description: "How many hours back to look (default: 24)",
         default: 24,
       },
@@ -27,13 +29,17 @@ export const blockingHistoryDefinition = {
           "Drill into a single database and list the queries that waited. Omit to sweep all databases and get a summary.",
       },
       minWaitMs: {
-        type: "number",
+        type: "integer",
+        minimum: 0,
+        maximum: 86_400_000,
         description:
           "Ignore anything that waited less than this, in milliseconds (default: 1000)",
         default: 1000,
       },
       top: {
-        type: "number",
+        type: "integer",
+        minimum: 1,
+        maximum: 200,
         description: "Max rows in single-database mode (default: 20)",
         default: 20,
       },

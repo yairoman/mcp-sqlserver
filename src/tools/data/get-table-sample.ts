@@ -1,5 +1,5 @@
 import type { AppConfig } from "../../config.js";
-import { executeQueryOnDatabase } from "../../connection.js";
+import { executeReadOnlyOnDatabase } from "../../connection.js";
 import {
   sanitizeIdentifier,
   qualifiedName,
@@ -27,7 +27,9 @@ export const getTableSampleDefinition = {
         description: "Table name",
       },
       sampleSize: {
-        type: "number",
+        type: "integer",
+        minimum: 1,
+        maximum: 100,
         description: "Number of sample rows (default: 10)",
         default: 10,
       },
@@ -43,13 +45,13 @@ export async function getTableSampleHandler(
   const database = sanitizeIdentifier(args.database as string);
   const schema = sanitizeIdentifier((args.schema as string) || "dbo");
   const table = sanitizeIdentifier(args.table as string);
-  const sampleSize = Math.min((args.sampleSize as number) || 10, 100);
+  const sampleSize = Math.min(Math.max(Math.trunc(Number(args.sampleSize)) || 10, 1), 100);
   const fullName = qualifiedName(schema, table);
 
   // Get sample rows
   const sampleQuery = `SELECT TOP ${sampleSize} * FROM ${fullName}`;
   const startTime = Date.now();
-  const sampleResult = await executeQueryOnDatabase(
+  const sampleResult = await executeReadOnlyOnDatabase(
     config,
     database,
     sampleQuery
@@ -57,7 +59,7 @@ export async function getTableSampleHandler(
   const elapsed = Date.now() - startTime;
 
   // Get row count
-  const countResult = await executeQueryOnDatabase(
+  const countResult = await executeReadOnlyOnDatabase(
     config,
     database,
     `SELECT COUNT(*) AS totalRows FROM ${fullName}`
@@ -78,7 +80,7 @@ export async function getTableSampleHandler(
     WHERE s.name = '${schema}' AND t.name = '${table}'
     ORDER BY c.column_id`;
 
-  const statsResult = await executeQueryOnDatabase(
+  const statsResult = await executeReadOnlyOnDatabase(
     config,
     database,
     statsQuery

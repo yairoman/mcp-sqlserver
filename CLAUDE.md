@@ -19,22 +19,36 @@ Qué skill aplica depende de si hay entregable — ver la sección de skills, m�
 
 ## Restricciones del validador de queries
 
-`src/utils/sql-sanitizer.ts` filtra las consultas antes de enviarlas. Tres reglas que
-producen rechazos poco intuitivos:
+`src/utils/sql-sanitizer.ts` filtra las consultas antes de enviarlas (`execute_select_query`,
+`execute_query` en modo lectura, `explain_query`, `validate_query`). Cuatro reglas que producen
+rechazos poco intuitivos:
 
-1. **Sin comentarios.** `DANGEROUS_PATTERNS` incluye `/--/g`, `/\/\*/g` y `/\*\//g`, así que
-   `execute_select_query` rechaza la consulta si contiene `--`, `/*` o `*/` **en cualquier
-   posición** — no solo al inicio. Error: *"Only SELECT and WITH (CTE) queries are allowed"*.
+1. **Sin comentarios.** `COMMENT_PATTERN` rechaza la consulta si contiene `--`, `/*` o `*/`
+   **en cualquier posición**, incluso dentro de un literal. Error: *"Only SELECT and WITH (CTE)
+   queries are allowed"* (o *"only a single read-only SELECT or WITH"* en explain/validate).
 
-2. **Debe empezar por `SELECT`, `WITH` o `SET`** (solo `NOCOUNT`, `TRANSACTION ISOLATION`,
-   `ANSI_NULLS`, `QUOTED_IDENTIFIER`, `STATISTICS`, `SHOWPLAN`). Un comentario inicial rompe
-   esta comprobación, incluso si el resto es un `SELECT` válido.
+2. **Una sola sentencia `SELECT` o `WITH`**, precedida opcionalmente por `SET` inofensivos
+   (`NOCOUNT`, `ANSI_NULLS`, `QUOTED_IDENTIFIER`, `STATISTICS IO|TIME|XML|PROFILE`,
+   `SHOWPLAN_*` con `ON|OFF`, y `TRANSACTION ISOLATION LEVEL`). `;` solo se admite al final.
 
-3. **Palabras vetadas dentro de literales de cadena.** `validateQuerySafety` busca por
+3. **Palabras clave vetadas en el código** (no dentro de literales ni de `[identificadores]`):
+   `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `INTO`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `EXEC`,
+   `EXECUTE`, `DECLARE`, `SET` (fuera del prefijo), `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVE`, `USE`,
+   `DBCC`, `GRANT`, `REVOKE`, `DENY`, `OPENQUERY`, `OPENROWSET`, `WAITFOR`, `RECEIVE`, `SEND`, y
+   los procedimientos `xp_*`, `sp_configure`, `sp_executesql`, `sp_OA*`. Una columna que se llame
+   así hay que escribirla entre corchetes (`[Update]`). Las tablas variables (`DECLARE @t`) y
+   `SELECT … INTO` no se pueden usar.
+
+4. **Palabras vetadas dentro de literales de cadena.** `validateQuerySafety` busca por
    subcadena, sin distinguir código de datos. `SHUTDOWN`, `WAITFOR DELAY`, `OPENROWSET`,
    `OPENDATASOURCE`, `BULK INSERT` y `xp_cmdshell` disparan el rechazo aunque aparezcan
    entrecomillados. Filtrar `sys.dm_os_wait_stats` excluyendo `'QDS_SHUTDOWN_QUEUE'` falla
    por esto: usar `get_wait_stats` en su lugar.
+
+El filtro es defensa en profundidad, no la frontera de seguridad: las tools de lectura corren
+además dentro de una transacción que siempre se revierte, y el control real es el login de
+mínimo privilegio (ver README). Los casos aceptados y rechazados están en
+`tests/sql-sanitizer.test.ts`; si cambias el filtro, actualiza esa tabla.
 
 Escribe las consultas sin comentarios y explica su intención en el mensaje, no en el SQL.
 
